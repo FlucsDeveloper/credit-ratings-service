@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # Backend API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: credit-ratings-api
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+      - HEADLESS=true
+      - MAX_CONCURRENCY=2
+      - REQUEST_TIMEOUT=30000
+      - SCRAPING_ALLOWED_FITCH=true
+      - SCRAPING_ALLOWED_SP=true
+      - SCRAPING_ALLOWED_MOODYS=true
+      - CACHE_TTL_DAYS=7
+      - CACHE_DB_PATH=/app/data/cache.db
+      - RATE_LIMIT_PER_DOMAIN=10
+      - RATE_LIMIT_WINDOW_SECONDS=60
+      - CIRCUIT_BREAKER_THRESHOLD=5
+      - CIRCUIT_BREAKER_TIMEOUT_SECONDS=300
+    volumes:
+      - api-cache:/app/data
+    networks:
+      - credit-ratings-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Frontend Web App
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: credit-ratings-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NODE_ENV=production
+    depends_on:
+      - api
+    networks:
+      - credit-ratings-network
+    restart: unless-stopped
+
+volumes:
+  api-cache:
+    driver: local
+
+networks:
+  credit-ratings-network:
+    driver: bridge

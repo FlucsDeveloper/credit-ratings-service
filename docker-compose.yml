@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: credit-ratings-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Server
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+
+      # Scraping
+      - HEADLESS=true
+      - MAX_CONCURRENCY=2
+      - REQUEST_TIMEOUT=30000
+
+      # Agency permissions
+      - SCRAPING_ALLOWED_FITCH=true
+      - SCRAPING_ALLOWED_SP=true
+      - SCRAPING_ALLOWED_MOODYS=true
+
+      # Cache
+      - CACHE_TTL_DAYS=7
+      - CACHE_DB_PATH=/app/data/cache.db
+
+      # Rate limiting
+      - RATE_LIMIT_PER_DOMAIN=10
+      - RATE_LIMIT_WINDOW_SECONDS=60
+      - CIRCUIT_BREAKER_THRESHOLD=5
+      - CIRCUIT_BREAKER_TIMEOUT_SECONDS=300
+
+      # Search
+      - MAX_SEARCH_RESULTS=5
+      - PREFER_EXACT_MATCH=true
+
+    volumes:
+      # Persist cache database
+      - cache-data:/app/data
+      # Mount logs (optional)
+      - ./logs:/app/logs
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  cache-data:
+    driver: local
