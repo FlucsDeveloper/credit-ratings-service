@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Credit Ratings Intelligence Platform</title>
+    <link rel="stylesheet" href="static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <div class="logo">
+                    <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                        <rect width="32" height="32" rx="8" fill="#3B82F6"/>
+                        <path d="M16 8L23 16L16 24L9 16L16 8Z" fill="white"/>
+                    </svg>
+                    <span class="logo-text">CreditIntel</span>
+                </div>
+                <nav class="nav">
+                    <a href="#" class="nav-link active">Dashboard</a>
+                    <a href="#" class="nav-link">Análise</a>
+                    <a href="#" class="nav-link">Relatórios</a>
+                    <a href="http://localhost:8000/docs" target="_blank" class="nav-link">API</a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <div class="container">
+            <!-- Search Section -->
+            <section class="search-section">
+                <div class="search-header">
+                    <h1 class="page-title">Credit Rating Analysis</h1>
+                    <p class="page-subtitle">Análise completa de ratings das principais agências globais</p>
+                </div>
+
+                <div class="search-box">
+                    <div class="search-input-wrapper">
+                        <svg class="search-icon" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                        </svg>
+                        <input
+                            type="text"
+                            id="companyInput"
+                            class="search-input"
+                            placeholder="Digite o nome da empresa (ex: Petrobras, Vale, Ambev)"
+                            autocomplete="off"
+                        >
+                    </div>
+                    <button id="searchBtn" class="btn btn-primary">
+                        <span id="btnText">Buscar Ratings</span>
+                        <span id="btnLoader" class="loader" style="display: none;"></span>
+                    </button>
+                </div>
+
+                <div class="quick-search">
+                    <span class="quick-search-label">Busca rápida:</span>
+                    <button class="chip" onclick="quickSearch('Petrobras')">Petrobras</button>
+                    <button class="chip" onclick="quickSearch('Vale')">Vale</button>
+                    <button class="chip" onclick="quickSearch('Ambev')">Ambev</button>
+                </div>
+            </section>
+
+            <!-- Results Section -->
+            <section id="resultsSection" class="results-section" style="display: none;">
+                <!-- Company Header -->
+                <div class="company-header">
+                    <div class="company-info">
+                        <h2 id="companyName" class="company-name"></h2>
+                        <div class="company-meta">
+                            <span id="companyCountry" class="badge"></span>
+                            <span id="lastUpdated" class="timestamp"></span>
+                        </div>
+                    </div>
+                    <div id="overallScore" class="overall-score">
+                        <div class="score-label">Score Médio</div>
+                        <div class="score-value">-</div>
+                        <div class="score-bucket">-</div>
+                    </div>
+                </div>
+
+                <!-- Rating Cards Grid -->
+                <div class="ratings-grid">
+                    <!-- Fitch Card -->
+                    <div class="rating-card" id="fitchCard">
+                        <div class="card-header">
+                            <div class="agency-logo">
+                                <div class="agency-icon" style="background: linear-gradient(135deg, #FF6B6B 0%, #C92A2A 100%);">F</div>
+                            </div>
+                            <div class="agency-info">
+                                <h3 class="agency-name">Fitch Ratings</h3>
+                                <p class="agency-desc">S&P/Fitch Scale</p>
+                            </div>
+                            <div class="card-status">
+                                <span class="status-badge status-loading">
+                                    <span class="status-dot"></span>
+                                    Carregando...
+                                </span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="rating-display">
+                                <div class="rating-value">-</div>
+                                <div class="rating-outlook">
+                                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                                    </svg>
+                                    <span>-</span>
+                                </div>
+                            </div>
+                            <div class="rating-details">
+                                <div class="detail-row">
+                                    <span class="detail-label">Score Numérico</span>
+                                    <span class="detail-value score-numeric">-</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Classificação</span>
+                                    <span class="detail-value">-</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Última Atualização</span>
+                                    <span class="detail-value date-value">-</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="#" class="card-link" target="_blank">Ver fonte →</a>
+                        </div>
+                    </div>
+
+                    <!-- S&P Card -->
+                    <div class="rating-card" id="spCard">
+                        <div class="card-header">
+                            <div class="agency-logo">
+                                <div class="agency-icon" style="background: linear-gradient(135deg, #4DABF7 0%, #1971C2 100%);">S&P</div>
+                            </div>
+                            <div class="agency-info">
+                                <h3 class="agency-name">S&P Global</h3>
+                                <p class="agency-desc">S&P/Fitch Scale</p>
+                            </div>
+                            <div class="card-status">
+                                <span class="status-badge status-loading">
+                                    <span class="status-dot"></span>
+                                    Carregando...
+                                </span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="rating-display">
+                                <div class="rating-value">-</div>
+                                <div class="rating-outlook">
+                                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                                    </svg>
+                                    <span>-</span>
+                                </div>
+                            </div>
+                            <div class="rating-details">
+                                <div class="detail-row">
+                                    <span class="detail-label">Score Numérico</span>
+                                    <span class="detail-value score-numeric">-</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Classificação</span>
+                                    <span class="detail-value">-</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Última Atualização</span>
+                                    <span class="detail-value date-value">-</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="#" class="card-link" target="_blank">Ver fonte →</a>
+                        </div>
+                    </div>
+
+                    <!-- Moody's Card -->
+                    <div class="rating-card" id="moodysCard">
+                        <div class="card-header">
+                            <div class="agency-logo">
+                                <div class="agency-icon" style="background: linear-gradient(135deg, #51CF66 0%, #2F9E44 100%);">M</div>
+                            </div>
+                            <div class="agency-info">
+                                <h3 class="agency-name">Moody's</h3>
+                                <p class="agency-desc">Moody's Scale</p>
+                            </div>
+                            <div class="card-status">
+                                <span class="status-badge status-loading">
+                                    <span class="status-dot"></span>
+                                    Carregando...
+                                </span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="rating-display">
+                                <div class="rating-value">-</div>
+                                <div class="rating-outlook">
+                                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+                                    </svg>
+                                    <span>-</span>
+                                </div>
+                            </div>
+                            <div class="rating-details">
+                                <div class="detail-row">
+                                    <span class="detail-label">Score Numérico</span>
+                                    <span class="detail-value score-numeric">-</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Classificação</span>
+                                    <span class="detail-value">-</span>
+                                </div>
+                                <div class="detail-row">
+                                    <span class="detail-label">Última Atualização</span>
+                                    <span class="detail-value date-value">-</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="#" class="card-link" target="_blank">Ver fonte →</a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Comparison Chart -->
+                <div class="chart-section">
+                    <div class="chart-header">
+                        <h3 class="chart-title">Comparação de Scores</h3>
+                        <p class="chart-subtitle">Menor score = Melhor rating (1 = AAA, 21 = D)</p>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="comparisonChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Notes Section -->
+                <div id="notesSection" class="notes-section" style="display: none;">
+                    <div class="notes-header">
+                        <svg width="20" height="20" fill="currentColor" viewBox="0 0 20 20">
+                            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/>
+                        </svg>
+                        <h3>Observações</h3>
+                    </div>
+                    <ul id="notesList" class="notes-list"></ul>
+                </div>
+            </section>
+
+            <!-- Empty State -->
+            <section id="emptyState" class="empty-state">
+                <div class="empty-state-icon">
+                    <svg width="64" height="64" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+                    </svg>
+                </div>
+                <h2 class="empty-state-title">Análise de Credit Ratings</h2>
+                <p class="empty-state-text">
+                    Digite o nome de uma empresa acima para visualizar os ratings das principais agências globais.
+                    <br>
+                    Dados atualizados em tempo real de Fitch, S&P Global e Moody's.
+                </p>
+            </section>
+
+            <!-- Error State -->
+            <section id="errorState" class="error-state" style="display: none;">
+                <div class="error-icon">
+                    <svg width="64" height="64" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </div>
+                <h2 class="error-title" id="errorTitle">Erro ao buscar ratings</h2>
+                <p class="error-text" id="errorMessage"></p>
+                <button class="btn btn-secondary" onclick="hideError()">Tentar Novamente</button>
+            </section>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <p class="footer-text">
+                    CreditIntel Platform © 2024 | Dados de Fitch Ratings, S&P Global e Moody's
+                </p>
+                <div class="footer-links">
+                    <a href="http://localhost:8000/docs" target="_blank">API Documentation</a>
+                    <a href="#">Termos de Uso</a>
+                    <a href="#">Contato</a>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="static/js/app.js"></script>
+</body>
+</html>

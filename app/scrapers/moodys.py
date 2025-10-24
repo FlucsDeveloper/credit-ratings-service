@@ -106,58 +106,50 @@ class MoodysScraper(BaseScraper):
     async def _extract_rating(self, page, soup: BeautifulSoup) -> Optional[str]:
         """Extract long-term rating using multiple strategies."""
 
-        # Strategy 1: Look for Moody's specific rating containers
-        selectors = [
-            "div.rating-value",
-            "span.issuer-rating",
-            "td.rating-cell",
-            "div.credit-rating__value",
-        ]
+        # Get all text content from the page
+        try:
+            page_text = await page.inner_text("body")
+        except:
+            page_text = soup.get_text()
 
-        for selector in selectors:
-            try:
-                elements = await page.query_selector_all(selector)
-                for elem in elements:
-                    text = await elem.text_content()
-                    if text:
-                        # Moody's pattern: Aaa, Aa1, A2, Baa3, Ba1, B2, Caa1, Ca, C
-                        match = re.search(r"\b([A-C][a-z]{0,2}[1-3]?)\b", text)
-                        if match:
-                            rating = self._clean_rating(match.group(1))
-                            # Validate it's a proper Moody's rating
-                            if rating and self._is_valid_moodys_rating(rating):
-                                return rating
-            except Exception:
-                continue
-
-        # Strategy 2: Look for specific sections (Issuer Rating, Long-Term Rating)
-        section_keywords = ["long-term", "issuer rating", "senior unsecured"]
-        for keyword in section_keywords:
-            sections = soup.find_all(string=re.compile(keyword, re.IGNORECASE))
-            for section in sections[:2]:
-                if section.parent:
-                    # Look for rating in surrounding elements
-                    parent_text = section.parent.get_text()
-                    match = re.search(r"\b([A-C][a-z]{0,2}[1-3]?)\b", parent_text)
-                    if match:
-                        rating = self._clean_rating(match.group(1))
-                        if self._is_valid_moodys_rating(rating):
-                            return rating
-
-        # Strategy 3: Regex fallback on full HTML
+        # Strategy 1: Look for specific rating labels with context
+        # Moody's typically shows "Issuer Rating" or "Long-Term Rating"
         patterns = [
-            r"Long[- ]Term\s+Rating[:\s]+([A-C][a-z]{0,2}[1-3]?)",
-            r"Issuer\s+Rating[:\s]+([A-C][a-z]{0,2}[1-3]?)",
-            r"Senior\s+Unsecured[:\s]+([A-C][a-z]{0,2}[1-3]?)",
+            # Match "Issuer Rating: Ba2"
+            r"Issuer\s+Rating[:\s]+(Aaa|Aa[1-3]|A[1-3]|Baa[1-3]|Ba[1-3]|B[1-3]|Caa[1-3]|Ca|C)",
+            # Match "Long-Term Rating: Ba2"
+            r"Long[- ]?Term\s+(?:Issuer\s+)?Rating[:\s]+(Aaa|Aa[1-3]|A[1-3]|Baa[1-3]|Ba[1-3]|B[1-3]|Caa[1-3]|Ca|C)",
+            # Match "Senior Unsecured: Ba2"
+            r"Senior\s+Unsecured[:\s]+(Aaa|Aa[1-3]|A[1-3]|Baa[1-3]|Ba[1-3]|B[1-3]|Caa[1-3]|Ca|C)",
+            # Match "LT Issuer Rating: Ba2"
+            r"LT\s+Issuer\s+Rating[:\s]+(Aaa|Aa[1-3]|A[1-3]|Baa[1-3]|Ba[1-3]|B[1-3]|Caa[1-3]|Ca|C)",
         ]
 
-        html_text = soup.get_text()
         for pattern in patterns:
-            match = re.search(pattern, html_text, re.IGNORECASE)
+            match = re.search(pattern, page_text, re.IGNORECASE | re.MULTILINE)
             if match:
                 rating = self._clean_rating(match.group(1))
                 if self._is_valid_moodys_rating(rating):
+                    logger.info("moodys_rating_extracted", pattern=pattern[:50], rating=rating)
                     return rating
+
+        # Strategy 2: Find all Moody's rating-like patterns and pick the most common
+        # Moody's pattern is more specific: starts with capital, followed by lowercase 'a' or 'aa', then optional number
+        all_ratings = re.findall(
+            r'\b(Aaa|Aa1|Aa2|Aa3|A1|A2|A3|Baa1|Baa2|Baa3|Ba1|Ba2|Ba3|B1|B2|B3|Caa1|Caa2|Caa3|Ca|C)\b',
+            page_text
+        )
+
+        if all_ratings:
+            # Count occurrences
+            from collections import Counter
+            rating_counts = Counter(all_ratings)
+            # Get most common rating that appears at least twice
+            for rating, count in rating_counts.most_common():
+                if count >= 2 and rating != 'C':  # C is too generic
+                    if self._is_valid_moodys_rating(rating):
+                        logger.info("moodys_rating_by_frequency", rating=rating, count=count)
+                        return rating
 
         return None
 

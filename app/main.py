@@ -1,9 +1,12 @@
 """Main application entry point."""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import router
 from app.core.config import get_settings
@@ -74,16 +77,25 @@ app.add_middleware(
 # Include API routes
 app.include_router(router, prefix="/api/v1")
 
+# Mount static files
+frontend_dir = Path(__file__).parent.parent / "frontend"
+if frontend_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(frontend_dir / "static")), name="static")
 
-@app.get("/")
-async def root():
-    """Root endpoint."""
-    return {
-        "service": "credit-ratings",
-        "version": "0.1.0",
-        "docs": "/docs",
-        "health": "/api/v1/health",
-    }
+    @app.get("/")
+    async def serve_frontend():
+        """Serve frontend application."""
+        return FileResponse(str(frontend_dir / "index.html"))
+else:
+    @app.get("/")
+    async def root():
+        """Root endpoint."""
+        return {
+            "service": "credit-ratings",
+            "version": "0.1.0",
+            "docs": "/docs",
+            "health": "/api/v1/health",
+        }
 
 
 if __name__ == "__main__":

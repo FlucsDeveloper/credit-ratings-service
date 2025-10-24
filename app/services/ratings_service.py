@@ -8,7 +8,7 @@ from app.models.enums import RatingAgency
 from app.models.schemas import AgencyRating, RatingsResponse, ResolvedEntity
 from app.scrapers import FitchScraper, MoodysScraper, SPScraper
 from app.services.cache import get_cache_service
-from app.services.entity_resolver_v3 import get_direct_agency_resolver
+from app.services.entity_resolver import get_entity_resolver
 
 logger = get_logger(__name__)
 
@@ -19,7 +19,7 @@ class RatingsService:
     def __init__(self) -> None:
         """Initialize ratings service."""
         self.cache = get_cache_service()
-        self.resolver = get_direct_agency_resolver()
+        self.resolver = get_entity_resolver()
 
         # Initialize scrapers
         self.scrapers = {

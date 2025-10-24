@@ -68,13 +68,29 @@ class BaseScraper(ABC):
     async def _create_page(self) -> Page:
         """Create new browser page with random user agent."""
         browser = await self._init_browser()
-        page = await browser.new_page()
 
-        # Set user agent
+        # Create context with more realistic settings
+        context = await browser.new_context(
+            user_agent=self._random_user_agent(),
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+        )
+
+        page = await context.new_page()
+
+        # Set comprehensive headers to avoid blocking
         await page.set_extra_http_headers(
             {
-                "User-Agent": self._random_user_agent(),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Cache-Control": "max-age=0",
             }
         )
 
@@ -110,7 +126,11 @@ class BaseScraper(ABC):
         page = await self._create_page()
 
         try:
-            response = await page.goto(url, timeout=self.settings.request_timeout)
+            # Add random delay before navigation to seem more human
+            import time
+            await page.wait_for_timeout(random.randint(500, 1500))
+
+            response = await page.goto(url, timeout=self.settings.request_timeout, wait_until="networkidle")
 
             if response is None:
                 raise Exception(f"No response received for {url}")
@@ -126,8 +146,11 @@ class BaseScraper(ABC):
             if status >= 400:
                 raise Exception(f"HTTP {status} for {url}")
 
-            # Wait for content to load
+            # Wait for content to load completely
             await page.wait_for_load_state("domcontentloaded")
+
+            # Add extra wait for dynamic content
+            await page.wait_for_timeout(random.randint(1000, 2000))
 
             html = await page.content()
             self.rate_limiter.record_success(self.domain)
