@@ -32,9 +32,29 @@ export async function getWikipediaData(companyName: string) {
 
     console.log(`[WIKIPEDIA] ✅ Extracted ${Object.keys(infobox).length} fields`);
 
+    // Clean ticker extraction - remove HTML and get just the symbol
+    let ticker = '';
+    const tradedAs = infobox['traded as'] || infobox['ticker symbol'] || '';
+
+    if (tradedAs) {
+      // Extract ticker symbol from patterns like "NYSE: AAPL" or "NASDAQ: MSFT"
+      const tickerMatch = tradedAs.match(/(?:NYSE|NASDAQ|AMEX|LSE|TSE|NSE):\s*([A-Z0-9]+)/i);
+      if (tickerMatch) {
+        ticker = tickerMatch[1];
+      } else {
+        // Try to find any standalone uppercase ticker (2-5 chars)
+        const standaloneMatch = tradedAs.match(/\b([A-Z]{2,5})\b/);
+        if (standaloneMatch) {
+          ticker = standaloneMatch[1];
+        }
+      }
+    }
+
+    console.log(`[WIKIPEDIA] Extracted ticker: ${ticker || 'none'}`);
+
     return {
       found: true,
-      ticker: infobox['traded as'] || infobox['ticker symbol'],
+      ticker: ticker || undefined,
       isin: infobox['isin'],
       industry: infobox['industry'],
       founded: infobox['founded'],

@@ -32,7 +32,7 @@ export default function Home() {
     setError(null);
 
     try {
-      const res = await fetch(`/api/ratings?company=${encodeURIComponent(company)}`);
+      const res = await fetch(`/api/ratings-v2?company=${encodeURIComponent(company)}`);
       const data = await res.json();
 
       if (data.success) {
@@ -47,8 +47,7 @@ export default function Home() {
     }
   };
 
-  const foundRatings = results?.ratings ?
-    Object.values(results.ratings).filter((r: any) => r.found).length : 0;
+  const foundRatings = results?.summary?.agenciesFound || 0;
 
   const handleExportPDF = async () => {
     if (!results) return;
@@ -230,7 +229,7 @@ export default function Home() {
                     <div>
                       <p className="text-sm text-muted-foreground">Avg. Score</p>
                       <p className="text-2xl font-bold">
-                        {results.summary?.averageNormalized?.toFixed(1) || "N/A"}
+                        {results.summary?.averageScore?.toFixed(1) || "N/A"}
                       </p>
                     </div>
                     <BarChart3 className="w-8 h-8 text-blue-500" />
@@ -256,11 +255,11 @@ export default function Home() {
             {/* Rating Cards */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {/* Fitch */}
-              <Card className={results.ratings.fitch?.found ? "hover:shadow-lg transition-all hover:border-primary/50" : ""}>
+              <Card className={results.ratings.fitch?.rating ? "hover:shadow-lg transition-all hover:border-primary/50" : ""}>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-lg flex items-center justify-between">
                     <span>Fitch Ratings</span>
-                    {results.ratings.fitch?.found ? (
+                    {results.ratings.fitch?.rating ? (
                       <CheckCircle2 className="w-5 h-5 text-green-500" />
                     ) : (
                       <AlertCircle className="w-5 h-5 text-muted-foreground" />
@@ -268,18 +267,19 @@ export default function Home() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {results.ratings.fitch?.found ? (
+                  {results.ratings.fitch?.rating ? (
                     <>
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-sm text-muted-foreground mb-1">Rating</p>
-                          <p className={`text-3xl font-bold ${getRatingColor(results.ratings.fitch.normalized || 0)}`}>
+                          <p className="text-3xl font-bold text-primary">
                             {results.ratings.fitch.rating}
                           </p>
                         </div>
-                        <Badge className={getRatingBadgeColor(results.ratings.fitch.normalized || 0)}>
-                          {results.ratings.fitch.normalized}/21
-                        </Badge>
+                        <div className="text-right">
+                          <p className="text-xs text-muted-foreground">Updated</p>
+                          <p className="text-xs font-mono">{results.ratings.fitch.date}</p>
+                        </div>
                       </div>
                       <div className="flex items-center justify-between pt-2 border-t">
                         <span className="text-sm text-muted-foreground">Outlook</span>
@@ -288,21 +288,24 @@ export default function Home() {
                           <span className="text-sm font-medium">{results.ratings.fitch.outlook || "N/A"}</span>
                         </div>
                       </div>
+                      <div className="text-xs text-muted-foreground pt-2 border-t">
+                        Source: {results.ratings.fitch.source_ref}
+                      </div>
                     </>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-                      <p className="text-sm">{results.ratings.fitch?.error || "No rating found"}</p>
+                      <p className="text-sm">{results.ratings.fitch?.reason || "No rating found"}</p>
                     </div>
                   )}
                 </CardContent>
               </Card>
 
               {/* S&P */}
-              <Card className={results.ratings.sp?.found ? "hover:shadow-lg transition-all hover:border-primary/50" : ""}>
+              <Card className={results.ratings.sp?.rating ? "hover:shadow-lg transition-all hover:border-primary/50" : ""}>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-lg flex items-center justify-between">
                     <span>S&P Global</span>
-                    {results.ratings.sp?.found ? (
+                    {results.ratings.sp?.rating ? (
                       <CheckCircle2 className="w-5 h-5 text-green-500" />
                     ) : (
                       <AlertCircle className="w-5 h-5 text-muted-foreground" />
@@ -310,18 +313,19 @@ export default function Home() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {results.ratings.sp?.found ? (
+                  {results.ratings.sp?.rating ? (
                     <>
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-sm text-muted-foreground mb-1">Rating</p>
-                          <p className={`text-3xl font-bold ${getRatingColor(results.ratings.sp.normalized || 0)}`}>
+                          <p className="text-3xl font-bold text-primary">
                             {results.ratings.sp.rating}
                           </p>
                         </div>
-                        <Badge className={getRatingBadgeColor(results.ratings.sp.normalized || 0)}>
-                          {results.ratings.sp.normalized}/21
-                        </Badge>
+                        <div className="text-right">
+                          <p className="text-xs text-muted-foreground">Updated</p>
+                          <p className="text-xs font-mono">{results.ratings.sp.date}</p>
+                        </div>
                       </div>
                       <div className="flex items-center justify-between pt-2 border-t">
                         <span className="text-sm text-muted-foreground">Outlook</span>
@@ -330,21 +334,24 @@ export default function Home() {
                           <span className="text-sm font-medium">{results.ratings.sp.outlook || "N/A"}</span>
                         </div>
                       </div>
+                      <div className="text-xs text-muted-foreground pt-2 border-t">
+                        Source: {results.ratings.sp.source_ref}
+                      </div>
                     </>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-                      <p className="text-sm">{results.ratings.sp?.error || "No rating found"}</p>
+                      <p className="text-sm">{results.ratings.sp?.reason || "No rating found"}</p>
                     </div>
                   )}
                 </CardContent>
               </Card>
 
               {/* Moody's */}
-              <Card className={results.ratings.moodys?.found ? "hover:shadow-lg transition-all hover:border-primary/50" : ""}>
+              <Card className={results.ratings.moodys?.rating ? "hover:shadow-lg transition-all hover:border-primary/50" : ""}>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-lg flex items-center justify-between">
                     <span>Moody's</span>
-                    {results.ratings.moodys?.found ? (
+                    {results.ratings.moodys?.rating ? (
                       <CheckCircle2 className="w-5 h-5 text-green-500" />
                     ) : (
                       <AlertCircle className="w-5 h-5 text-muted-foreground" />
@@ -352,18 +359,19 @@ export default function Home() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {results.ratings.moodys?.found ? (
+                  {results.ratings.moodys?.rating ? (
                     <>
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-sm text-muted-foreground mb-1">Rating</p>
-                          <p className={`text-3xl font-bold ${getRatingColor(results.ratings.moodys.normalized || 0)}`}>
+                          <p className="text-3xl font-bold text-primary">
                             {results.ratings.moodys.rating}
                           </p>
                         </div>
-                        <Badge className={getRatingBadgeColor(results.ratings.moodys.normalized || 0)}>
-                          {results.ratings.moodys.normalized}/21
-                        </Badge>
+                        <div className="text-right">
+                          <p className="text-xs text-muted-foreground">Updated</p>
+                          <p className="text-xs font-mono">{results.ratings.moodys.date}</p>
+                        </div>
                       </div>
                       <div className="flex items-center justify-between pt-2 border-t">
                         <span className="text-sm text-muted-foreground">Outlook</span>
@@ -372,10 +380,13 @@ export default function Home() {
                           <span className="text-sm font-medium">{results.ratings.moodys.outlook || "N/A"}</span>
                         </div>
                       </div>
+                      <div className="text-xs text-muted-foreground pt-2 border-t">
+                        Source: {results.ratings.moodys.source_ref}
+                      </div>
                     </>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-                      <p className="text-sm">{results.ratings.moodys?.error || "No rating found"}</p>
+                      <p className="text-sm">{results.ratings.moodys?.reason || "No rating found"}</p>
                     </div>
                   )}
                 </CardContent>
@@ -412,14 +423,14 @@ export default function Home() {
               <CardContent className="pt-6">
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                   <div>
-                    <p className="text-muted-foreground">Searched At</p>
+                    <p className="text-muted-foreground">Company</p>
                     <p className="font-mono">
-                      {new Date(results.searchedAt).toLocaleString()}
+                      {results.identifiers?.ticker || "N/A"}
                     </p>
                   </div>
                   <div>
-                    <p className="text-muted-foreground">Processing Time</p>
-                    <p className="font-mono">{results.processingTime}</p>
+                    <p className="text-muted-foreground">Last Updated</p>
+                    <p className="font-mono">{new Date(results.summary.lastUpdated).toLocaleString()}</p>
                   </div>
                   <div>
                     <p className="text-muted-foreground">Data Sources</p>
