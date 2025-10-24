@@ -54,6 +54,28 @@ class BaseScraper(ABC):
         """
         pass
 
+    async def scrape_url(self, url: str) -> Optional[AgencyRating]:
+        """
+        Scrape rating from a specific URL.
+
+        Args:
+            url: Direct URL to scrape
+
+        Returns:
+            AgencyRating with extracted data or None
+        """
+        # Default implementation - subclasses can override
+        try:
+            return await self.scrape(url)
+        except Exception as e:
+            logger.error(
+                "scrape_url_failed",
+                agency=self.agency.value,
+                url=url,
+                error=str(e)
+            )
+            return None
+
     async def _check_rate_limit(self) -> tuple[bool, Optional[str]]:
         """Check rate limiter before making request."""
         return await self.rate_limiter.acquire(self.domain)

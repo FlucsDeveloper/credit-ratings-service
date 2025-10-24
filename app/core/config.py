@@ -55,6 +55,21 @@ class Settings(BaseSettings):
         default=True, description="Prefer exact company name matches"
     )
 
+    # LLM Configuration
+    llm_provider: Literal["groq", "gemini", "openai"] = Field(
+        default="groq", description="LLM provider to use"
+    )
+    groq_api_key: str = Field(default="", description="Groq API key")
+    gemini_api_key: str = Field(default="", description="Google Gemini API key")
+    openai_api_key: str = Field(default="", description="OpenAI API key")
+    llm_model: str = Field(
+        default="llama-3.1-70b-versatile",
+        description="LLM model to use (groq: llama-3.1-70b-versatile, gemini: gemini-1.5-flash)"
+    )
+    llm_temperature: float = Field(default=0.1, description="LLM temperature for responses")
+    llm_max_tokens: int = Field(default=4000, description="Max tokens for LLM response")
+    llm_timeout: int = Field(default=30, description="LLM timeout in seconds")
+
 
 @lru_cache
 def get_settings() -> Settings:

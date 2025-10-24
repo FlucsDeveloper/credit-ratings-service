@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import router
+from app.api.v2.endpoints import router as v2_router
+from app.api.v3_endpoints import router as v3_router
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
 from app.services.cache import get_cache_service
@@ -76,6 +78,8 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(router, prefix="/api/v1")
+app.include_router(v2_router)  # v2 routes with LLM extraction
+app.include_router(v3_router)  # v3 routes with enhanced LLM entity resolution
 
 # Mount static files
 frontend_dir = Path(__file__).parent.parent / "frontend"
@@ -92,9 +96,16 @@ else:
         """Root endpoint."""
         return {
             "service": "credit-ratings",
-            "version": "0.1.0",
+            "version": "0.3.0",
             "docs": "/docs",
             "health": "/api/v1/health",
+            "v2_health": "/api/v2/health",
+            "v3_health": "/api/v3/health",
+            "features": {
+                "v1": "Traditional CSS selector-based scraping",
+                "v2": "LLM-based intelligent extraction",
+                "v3": "Enhanced LLM entity resolution with intelligent name matching"
+            }
         }
 
 
