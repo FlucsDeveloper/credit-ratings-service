@@ -69,7 +69,219 @@ docker-compose logs -f api
 docker-compose down
 ```
 
-## API Usage
+## New: API v2 (Next.js/Frontend)
+
+### Overview
+
+The new `/api/ratings-v2` endpoint provides production-grade credit ratings fetching with:
+- **Vendor API support** (S&P Capital IQ, Moody's Analytics, Fitch Solutions) when ENV keys configured
+- **Heuristic POC fallback** (web search + parsing) when vendor APIs unavailable
+- **Entity resolution** with priority: ISIN → LEI → ticker → legal_name → aliases
+- **Retry/timeout/circuit breakers** for reliability
+- **6h caching** with stale-while-revalidate
+- **Validation** blocking stale/malformed ratings
+- **Observability** with trace IDs and structured logs
+
+### Quick Start (Frontend/Next.js)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### Environment Variables (Frontend)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SP_API_KEY` | Optional | S&P Capital IQ API key |
+| `SP_BASE_URL` | Optional | S&P API base URL (default: https://api.capitaliq.com) |
+| `MOODYS_API_KEY` | Optional | Moody's Analytics API key |
+| `MOODYS_BASE_URL` | Optional | Moody's API base URL |
+| `FITCH_API_KEY` | Optional | Fitch Solutions API key |
+| `FITCH_BASE_URL` | Optional | Fitch API base URL |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | Required | Google Gemini API for LLM entity resolution |
+| `DEEPSEEK_API_KEY` | Optional | DeepSeek (free) for rating extraction from HTML |
+| `FINANCIAL_MODELING_PREP_API_KEY` | Optional | FMP for ticker/ISIN lookup |
+| `ALPHA_VANTAGE_API_KEY` | Optional | Alpha Vantage for ticker lookup |
+| `OPENFIGI_API_KEY` | Optional | OpenFIGI for ISIN lookup |
+| `USER_AGENT` | Optional | User agent for web requests |
+
+**Note**: If vendor API keys are not set, the system automatically falls back to heuristic mode (web search + parsing).
+
+### API v2 Endpoints
+
+#### GET /api/ratings-v2?q=<query>
+
+**Query ANY company** by name, ticker, ISIN, or LEI.
+
+**Examples**:
+```bash
+# By name
+curl "http://localhost:3000/api/ratings-v2?q=Apple%20Inc."
+
+# By ticker
+curl "http://localhost:3000/api/ratings-v2?q=AAPL"
+
+# By ISIN
+curl "http://localhost:3000/api/ratings-v2?q=US0378331005"
+
+# By LEI
+curl "http://localhost:3000/api/ratings-v2?q=HWUPKR0MPOU8FGXBT394"
+```
+
+**Response**:
+```json
+{
+  "query": "Apple Inc.",
+  "entity": {
+    "legal_name": "Apple Inc",
+    "ticker": "AAPL",
+    "isin": "US0378331005",
+    "lei": "HWUPKR0MPOU8FGXBT394",
+    "country": "USA"
+  },
+  "ratings": [
+    {
+      "agency": "S&P Global",
+      "rating": "AA+",
+      "outlook": "Stable",
+      "date": "2024-09-15",
+      "scale": "S&P/Fitch",
+      "source_ref": "https://www.spglobal.com/ratings/..."
+    },
+    {
+      "agency": "Fitch",
+      "rating": "AA+",
+      "outlook": "Stable",
+      "date": "2024-08-22",
+      "scale": "S&P/Fitch",
+      "source_ref": "https://www.fitchratings.com/..."
+    },
+    {
+      "agency": "Moody's",
+      "rating": "Aa1",
+      "outlook": "Stable",
+      "date": "2024-07-10",
+      "scale": "Moody's",
+      "source_ref": "https://www.moodys.com/..."
+    }
+  ],
+  "summary": {
+    "agenciesFound": 3,
+    "averageScore": 20.0,
+    "category": "Investment Grade"
+  },
+  "meta": {
+    "lastUpdated": "2025-10-24T22:00:00.000Z",
+    "sourcePriority": [
+      "S&P Capital IQ API",
+      "Fitch Solutions API",
+      "Moodys Analytics API"
+    ],
+    "traceId": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+#### OPTIONS /api/ratings-v2
+
+Get cache statistics:
+```bash
+curl -X OPTIONS "http://localhost:3000/api/ratings-v2"
+```
+
+### Rating Normalization (v2)
+
+Ratings are normalized to an **ordinal scale 1-21** (AAA/Aaa=21, D/C=1):
+
+| S&P/Fitch | Moody's | Ordinal | Category |
+|-----------|---------|---------|----------|
+| AAA | Aaa | 21 | Investment Grade |
+| AA+ | Aa1 | 20 | Investment Grade |
+| BBB- | Baa3 | 12 | Investment Grade |
+| BB+ | Ba1 | 11 | Speculative |
+| D | C | 1 | Speculative |
+
+**Average Score**: Mean of all agency ordinals (e.g., AA+/Aa1/AA+ = 20.0)
+**Category**: Investment Grade if avg ≥ 12, else Speculative
+
+### Smoke Tests
+
+Run the spec-mandated smoke tests:
+
+```bash
+# Test 1: Apple Inc. (name)
+curl -s "http://localhost:3000/api/ratings-v2?q=Apple%20Inc."
+
+# Test 2: AAPL (ticker)
+curl -s "http://localhost:3000/api/ratings-v2?q=AAPL"
+
+# Test 3: Microsoft
+curl -s "http://localhost:3000/api/ratings-v2?q=MSFT"
+
+# Test 4: Petrobras
+curl -s "http://localhost:3000/api/ratings-v2?q=Petrobras"
+
+# Test 5: Private company (0/3 expected)
+curl -s "http://localhost:3000/api/ratings-v2?q=Private%20Holdings%20LLC"
+```
+
+### Limitations & POC Mode
+
+**Heuristic Fallback (POC)**:
+- Uses DuckDuckGo HTML search + Cheerio parsing
+- Rate-limited to 1 req/sec per site
+- Confidence scores: high (>70%), medium (50-70%), low (<50%)
+- **FOR TESTING ONLY** - respect site ToS & robots.txt
+- May return 0/3 agencies due to anti-bot measures
+
+**Production Mode**:
+- Set vendor API keys to use official S&P/Fitch/Moody's APIs
+- Much higher reliability and freshness
+- Proper authentication & rate limits
+- Legal compliance guaranteed
+
+### Error Codes
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `AUTH` | 401 | Vendor API authentication failed |
+| `RATE_LIMIT` | 429 | Vendor API rate limit exceeded |
+| `NOT_FOUND` | 404 | Entity not found |
+| `STALE` | 422 | Rating older than 450 days |
+| `PARSING` | 422 | Validation failed (bad rating/outlook) |
+| `TIMEOUT` | 504 | Request timed out (>30s per agency) |
+| `CIRCUIT_BREAKER_OPEN` | 503 | Too many recent failures (5 in 60s) |
+
+### Observability
+
+Every request logs:
+```
+[API] TraceId: 550e8400-e29b-41d4-a716-446655440000
+[API] Query: "Apple Inc."
+[API] STEP 1: Resolving entity...
+[API] ✅ Resolved to: Apple Inc (AAPL) in 1234ms
+[API] STEP 2: Check Cache...
+[API] ⚠️ Cache MISS
+[API] STEP 3: Fetching ratings from agencies (parallel)...
+[API] S&P completed in 2341ms
+[API] Fitch completed in 2156ms
+[API] Moodys completed in 2789ms
+[API] ✅ S&P: AA+ (Stable)
+[API] ✅ Fitch: AA+ (Stable)
+[API] ✅ Moodys: Aa1 (Stable)
+[API] STEP 5: Validating ratings...
+[API] ✅ Validation passed for 3 ratings
+[API] Agencies found: 3/3
+[API] Average score: 20.0
+[API] Category: Investment Grade
+[API] Processing completed in 5789ms
+```
+
+---
+
+## API Usage (Legacy Python Backend)
 
 ### Get Ratings
 

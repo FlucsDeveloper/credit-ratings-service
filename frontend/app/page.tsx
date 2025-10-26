@@ -27,16 +27,43 @@ export default function Home() {
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Transformar array de ratings em objeto {sp, fitch, moodys}
+  const transformRatings = (data: any) => {
+    if (!data || !data.ratings) return data;
+
+    const ratingsObj: any = { sp: null, fitch: null, moodys: null };
+
+    data.ratings.forEach((rating: any) => {
+      if (rating.agency === "S&P Global" || rating.agency === "S&P") {
+        ratingsObj.sp = rating;
+      } else if (rating.agency === "Fitch") {
+        ratingsObj.fitch = rating;
+      } else if (rating.agency === "Moody's") {
+        ratingsObj.moodys = rating;
+      }
+    });
+
+    return { ...data, ratings: ratingsObj };
+  };
+
   const handleSearch = async (company: string) => {
     setIsLoading(true);
     setError(null);
 
     try {
-      const res = await fetch(`/api/ratings-v2?company=${encodeURIComponent(company)}`);
+      const res = await fetch(`/api/ratings-v2?q=${encodeURIComponent(company)}`);
       const data = await res.json();
 
-      if (data.success) {
-        setResults(data);
+      // API sempre retorna 200 com status: "ok" ou "degraded"
+      if (data.status === "ok" || data.status === "degraded") {
+        // Transformar ratings array em objeto
+        const transformedData = transformRatings(data);
+        setResults(transformedData);
+
+        // Mostrar aviso se degraded
+        if (data.status === "degraded" && data.ratings.length === 0) {
+          setError(`No ratings found for "${company}". ${data.diagnostics?.errors?.join(', ') || 'Try another company.'}`);
+        }
       } else {
         setError(data.error || "Failed to fetch ratings");
       }
@@ -65,7 +92,8 @@ export default function Home() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${results.company.replace(/[^a-z0-9]/gi, '_')}_credit_ratings.pdf`;
+      const companyName = results.entity?.legal_name || results.query || 'company';
+      a.download = `${companyName.replace(/[^a-z0-9]/gi, '_')}_credit_ratings.pdf`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -92,7 +120,8 @@ export default function Home() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${results.company.replace(/[^a-z0-9]/gi, '_')}_credit_ratings.xlsx`;
+      const companyName = results.entity?.legal_name || results.query || 'company';
+      a.download = `${companyName.replace(/[^a-z0-9]/gi, '_')}_credit_ratings.xlsx`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -204,7 +233,10 @@ export default function Home() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-sm text-muted-foreground">Company</p>
-                      <p className="text-2xl font-bold">{results.company}</p>
+                      <p className="text-2xl font-bold">{results.entity?.legal_name || results.query}</p>
+                      {results.entity?.ticker && (
+                        <p className="text-xs text-muted-foreground mt-1">{results.entity.ticker}</p>
+                      )}
                     </div>
                     <Building2 className="w-8 h-8 text-muted-foreground" />
                   </div>

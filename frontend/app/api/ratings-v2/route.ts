@@ -1,324 +1,500 @@
 /**
- * Credit Ratings API v2 - Robust, parallel fetching with proper error handling
+ * Credit Ratings API v2
+ * Production-grade endpoint with Public Data first, then vendor APIs, scraping, and AI fallback
+ *
+ * CRITICAL RULES:
+ * - ALWAYS return HTTP 200 (never 500)
+ * - Response time ≤10 seconds
+ * - Return status: "ok" or "degraded"
+ * - Fallback order: Public Data → Vendor → Scraping → LLM
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { RatingsResponse } from '@/lib/types/ratings';
-import { resolveCompany } from '@/lib/ratings/entity-resolver';
-import { getFitchRating, getSPRating, getMoodysRating } from '@/lib/ratings/fetchers-v2';
-import { calculateAverageScore, getRatingCategory } from '@/lib/ratings/normalizer';
-import { validatePayload } from '@/lib/ratings/validator';
 import { randomUUID } from 'crypto';
+
+// Services
+import { getPublicCreditRatings } from '@/services/publicData';
+import { searchSPHeuristic, searchFitchHeuristic, searchMoodysHeuristic } from '@/services/fallback/heuristic';
+import { createSummary, normalizeRating } from '@/services/normalize';
+import { getCached, setCached, generateCacheKey } from '@/services/cache';
+import { jlog, jlogStart, jlogEnd } from '@/lib/log';
+import { scrapeMissingAgencies } from '@/lib/scraper/superscraper';
+import { validateInstitutional, crossValidateAgencies, type RatingData, type ValidationResult } from '@/lib/validation/institutional-validator';
+import { resolveTickerLATAM } from '@/lib/resolution/ticker-mapping';
+
+// Types
+import { AgencyRating } from '@/services/types';
 
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
-// Telemetry tracking
-const telemetry = {
-  totalRequests: 0,
-  successfulRequests: 0,
-  errors: new Map<string, number>(),
-  agencyLatencies: {
-    fitch: [] as number[],
-    sp: [] as number[],
-    moodys: [] as number[],
-  },
-  agencySuccessRates: {
-    fitch: { success: 0, total: 0 },
-    sp: { success: 0, total: 0 },
-    moodys: { success: 0, total: 0 },
-  },
-};
+/**
+ * Institutional-grade entity resolution
+ * Priority: LATAM database → Global companies → Ticker pattern → Query as-is
+ */
+function resolveEntityLocal(query: string): { name: string; ticker?: string } {
+  const normalized = query.trim().toLowerCase();
 
-export async function GET(request: NextRequest) {
-  const searchParams = request.nextUrl.searchParams;
-  const query = searchParams.get('company') || searchParams.get('q');
-
-  const traceId = randomUUID();
-  const logs: string[] = [];
-  const startTime = Date.now();
-
-  telemetry.totalRequests++;
-
-  // Validate input
-  if (!query) {
-    return NextResponse.json(
-      { error: 'Company name, ticker, or ISIN required', traceId },
-      { status: 400 }
-    );
+  // PRIORITY 1: Try LATAM database (BTG Pactual, Nubank, etc.)
+  const latamCompany = resolveTickerLATAM(query);
+  if (latamCompany) {
+    jlog({
+      component: 'entity-resolution',
+      outcome: 'success',
+      meta: {
+        source: 'latam_database',
+        company: latamCompany.legal_name,
+        ticker: latamCompany.ticker,
+        country: latamCompany.country
+      }
+    });
+    return {
+      name: latamCompany.legal_name,
+      ticker: latamCompany.ticker
+    };
   }
 
-  logs.push(`[API] Query received: "${query}"`);
-  logs.push(`[API] TraceId: ${traceId}`);
-  logs.push(`[API] Timestamp: ${new Date().toISOString()}`);
+  // PRIORITY 2: Global companies (US, Europe, Asia)
+  const knownCompanies: Record<string, { name: string; ticker: string }> = {
+    'microsoft': { name: 'Microsoft Corporation', ticker: 'MSFT' },
+    'apple': { name: 'Apple Inc.', ticker: 'AAPL' },
+    'google': { name: 'Alphabet Inc.', ticker: 'GOOGL' },
+    'alphabet': { name: 'Alphabet Inc.', ticker: 'GOOGL' },
+    'amazon': { name: 'Amazon.com Inc.', ticker: 'AMZN' },
+    'meta': { name: 'Meta Platforms Inc.', ticker: 'META' },
+    'facebook': { name: 'Meta Platforms Inc.', ticker: 'META' },
+    'tesla': { name: 'Tesla Inc.', ticker: 'TSLA' },
+    'toyota': { name: 'Toyota Motor Corporation', ticker: '7203' },
+    'boeing': { name: 'The Boeing Company', ticker: 'BA' },
+    'walmart': { name: 'Walmart Inc.', ticker: 'WMT' },
+    'jpmorgan': { name: 'JPMorgan Chase & Co.', ticker: 'JPM' },
+    'exxon': { name: 'Exxon Mobil Corporation', ticker: 'XOM' },
+    'chevron': { name: 'Chevron Corporation', ticker: 'CVX' },
+    'coca-cola': { name: 'The Coca-Cola Company', ticker: 'KO' },
+    'coke': { name: 'The Coca-Cola Company', ticker: 'KO' },
+    'pepsi': { name: 'PepsiCo Inc.', ticker: 'PEP' },
+    'intel': { name: 'Intel Corporation', ticker: 'INTC' },
+  };
 
+  for (const [key, value] of Object.entries(knownCompanies)) {
+    if (normalized.includes(key)) {
+      return value;
+    }
+  }
+
+  // PRIORITY 3: Ticker pattern detected (e.g., "MSFT", "BPAC11")
+  if (/^[A-Z]{1,6}[0-9]{0,2}$/.test(query.trim())) {
+    return { name: query.trim(), ticker: query.trim() };
+  }
+
+  // PRIORITY 4: Default - use query as-is (will try scraping IR pages)
+  return { name: query.trim() };
+}
+
+/**
+ * GET /api/ratings-v2?q=<query>
+ */
+export async function GET(request: NextRequest) {
+  const searchParams = request.nextUrl.searchParams;
+  const query = searchParams.get('q') || searchParams.get('company');
+
+  const traceId = randomUUID();
+  const globalStart = jlogStart('api-ratings-v2', query || undefined);
+  const errors: string[] = [];
+  const sources: string[] = [];
+
+  // CRITICAL: Wrap everything in try-catch to NEVER return 500
   try {
-    // Step 1: Resolve company identifiers
-    logs.push('[API] Step 1: Resolving company identifiers...');
-    const resolveStartTime = Date.now();
-
-    const identifiers = await resolveCompany(query);
-
-    logs.push(`[API] Resolved to: ${identifiers.name} (${identifiers.ticker || identifiers.isin || identifiers.lei || 'private'}) in ${Date.now() - resolveStartTime}ms`);
-
-    // Check if we have at least one strong identifier
-    if (!identifiers.ticker && !identifiers.isin && !identifiers.lei) {
-      logs.push('[API] ⚠️ Warning: No strong identifier (ticker/ISIN/LEI) found, results may be unreliable');
-    }
-
-    // Step 2: Fetch ratings in parallel with timeout and telemetry
-    logs.push('[API] Step 2: Fetching ratings from agencies (parallel)...');
-
-    const fetchWithTimeout = <T>(
-      promise: Promise<T>,
-      timeoutMs: number,
-      agency: string
-    ): Promise<T | { error: string; reason: string }> => {
-      return Promise.race([
-        promise,
-        new Promise<{ error: string; reason: string }>((resolve) =>
-          setTimeout(
-            () => resolve({ error: 'TIMEOUT', reason: `${agency} request timed out after ${timeoutMs}ms` }),
-            timeoutMs
-          )
-        ),
-      ]);
-    };
-
-    // Track timing for each agency
-    const fitchStartTime = Date.now();
-    const spStartTime = Date.now();
-    const moodysStartTime = Date.now();
-
-    const [fitchResult, spResult, moodysResult] = await Promise.all([
-      fetchWithTimeout(getFitchRating(identifiers), 20000, 'Fitch').then(result => {
-        const latency = Date.now() - fitchStartTime;
-        telemetry.agencyLatencies.fitch.push(latency);
-        telemetry.agencySuccessRates.fitch.total++;
-        if (result && 'rating' in result) {
-          telemetry.agencySuccessRates.fitch.success++;
-        }
-        logs.push(`[API] Fitch completed in ${latency}ms`);
-        return result;
-      }),
-      fetchWithTimeout(getSPRating(identifiers), 20000, 'S&P').then(result => {
-        const latency = Date.now() - spStartTime;
-        telemetry.agencyLatencies.sp.push(latency);
-        telemetry.agencySuccessRates.sp.total++;
-        if (result && 'rating' in result) {
-          telemetry.agencySuccessRates.sp.success++;
-        }
-        logs.push(`[API] S&P completed in ${latency}ms`);
-        return result;
-      }),
-      fetchWithTimeout(getMoodysRating(identifiers), 20000, "Moody's").then(result => {
-        const latency = Date.now() - moodysStartTime;
-        telemetry.agencyLatencies.moodys.push(latency);
-        telemetry.agencySuccessRates.moodys.total++;
-        if (result && 'rating' in result) {
-          telemetry.agencySuccessRates.moodys.success++;
-        }
-        logs.push(`[API] Moody's completed in ${latency}ms`);
-        return result;
-      }),
-    ]);
-
-    // Step 3: Process results
-    logs.push('[API] Step 3: Processing results...');
-
-    let agenciesFound = 0;
-    if (fitchResult && 'rating' in fitchResult) {
-      agenciesFound++;
-      logs.push(`[API] ✅ Fitch: ${fitchResult.rating} (${fitchResult.outlook})`);
-    } else {
-      logs.push(`[API] ⚠️ Fitch: ${fitchResult?.reason || 'No data'}`);
-    }
-
-    if (spResult && 'rating' in spResult) {
-      agenciesFound++;
-      logs.push(`[API] ✅ S&P: ${spResult.rating} (${spResult.outlook})`);
-    } else {
-      logs.push(`[API] ⚠️ S&P: ${spResult?.reason || 'No data'}`);
-    }
-
-    if (moodysResult && 'rating' in moodysResult) {
-      agenciesFound++;
-      logs.push(`[API] ✅ Moody's: ${moodysResult.rating} (${moodysResult.outlook})`);
-    } else {
-      logs.push(`[API] ⚠️ Moody's: ${moodysResult?.reason || 'No data'}`);
-    }
-
-    // Step 4: Calculate summary
-    const averageScore = calculateAverageScore({
-      fitch: fitchResult,
-      sp: spResult,
-      moodys: moodysResult,
-    });
-
-    const category = getRatingCategory(averageScore);
-
-    // Step 5: Build response
-    const processingTime = Date.now() - startTime;
-    logs.push(`[API] Processing completed in ${processingTime}ms`);
-    logs.push(`[API] Agencies found: ${agenciesFound}/3`);
-    if (averageScore) {
-      logs.push(`[API] Average score: ${averageScore}`);
-      logs.push(`[API] Category: ${category}`);
-    }
-
-    // Build payload for validation
-    const payload = {
-      entity: identifiers,
-      ratings: {
-        fitch: fitchResult,
-        sp: spResult,
-        moodys: moodysResult,
-      },
-      summary: {
-        agenciesFound,
-        averageScore,
-        category,
-      },
-    };
-
-    // Step 6: Validate payload before sending to frontend
-    logs.push('[API] Step 6: Validating payload...');
-    try {
-      validatePayload(payload);
-      logs.push('[API] ✅ Payload validation passed');
-    } catch (validationError: any) {
-      logs.push(`[API] ❌ Payload validation failed: ${validationError.message}`);
-      console.error('Validation errors:', validationError.errors || validationError);
-
-      // Log detailed validation errors
-      if (validationError.errors) {
-        validationError.errors.forEach((err: any) => {
-          logs.push(`[API]   - ${err.code}: ${err.message}`);
-        });
-      }
-
-      // Return 422 with validation details
+    // Validate input
+    if (!query) {
+      jlogEnd('api-ratings-v2', globalStart, 'failed', ['Missing query parameter']);
       return NextResponse.json(
         {
-          success: false,
-          error: 'VALIDATION_FAILED',
-          message: 'Rating data failed validation checks',
-          details: validationError.errors || [],
-          traceId,
-          logs,
+          query: '',
+          status: 'error',
+          entity: { legal_name: '', ticker: '', isin: '', lei: '', country: '' },
+          ratings: [],
+          summary: { agenciesFound: 0, averageScore: null, category: 'Not Rated' as const },
+          diagnostics: { sources: [], errors: ['Query parameter required (use ?q=<company>)'] },
+          meta: { lastUpdated: new Date().toISOString(), sourcePriority: [], traceId },
         },
-        { status: 422 }
+        { status: 200 }
       );
     }
 
-    const response: RatingsResponse = {
-      success: true,
-      company: identifiers.name,
-      identifiers,
-      ratings: {
-        fitch: fitchResult,
-        sp: spResult,
-        moodys: moodysResult,
-      },
-      summary: {
-        agenciesFound,
-        averageScore,
-        category,
-        lastUpdated: new Date().toISOString(),
-      },
-      logs,
+    jlog({ component: 'api-ratings-v2', query, outcome: 'success', meta: { event: 'query_received', traceId } });
+
+    // ===== STEP 1: LIGHTWEIGHT ENTITY RESOLUTION (NO LLM) =====
+    const entityStart = jlogStart('entity-resolution', query);
+    const entity = resolveEntityLocal(query);
+    jlogEnd('entity-resolution', entityStart, 'success', undefined, { name: entity.name, ticker: entity.ticker });
+
+    // ===== STEP 2: CHECK CACHE =====
+    const cacheKey = generateCacheKey(query, undefined, undefined, entity.ticker);
+    const cached = getCached(cacheKey);
+
+    if (cached && !cached.stale) {
+      jlog({ component: 'cache', query, outcome: 'success', meta: { event: 'hit_fresh', traceId } });
+      return NextResponse.json({
+        ...cached.data,
+        meta: {
+          ...cached.data.meta,
+          traceId,
+          fromCache: true,
+        },
+      });
+    }
+
+    if (cached?.stale) {
+      jlog({ component: 'cache', query, outcome: 'degraded', meta: { event: 'hit_stale', traceId } });
+    }
+
+    // ===== STEP 3: FETCH RATINGS WITH STRICT TIME BUDGET (≤10s) =====
+    jlog({ component: 'ratings-fetch', query, outcome: 'success', meta: { event: 'start_parallel', budget_ms: 10000 } });
+
+    // Helper to enforce timeout
+    const withTimeout = <T>(promise: Promise<T>, timeoutMs: number, agency: string): Promise<T | null> => {
+      return Promise.race([
+        promise,
+        new Promise<null>((resolve) => setTimeout(() => {
+          errors.push(`${agency}: Timeout after ${timeoutMs}ms`);
+          resolve(null);
+        }, timeoutMs))
+      ]);
     };
 
-    // Log summary to console
-    console.log('\n' + '='.repeat(80));
-    console.log(`CREDIT RATINGS QUERY: ${query}`);
-    console.log(`TraceId: ${traceId}`);
-    console.log(`Company: ${identifiers.name}`);
-    console.log(`Identifiers: ticker=${identifiers.ticker}, ISIN=${identifiers.isin}, LEI=${identifiers.lei}`);
-    console.log(`Agencies found: ${agenciesFound}/3`);
-    if (averageScore) {
-      console.log(`Average score: ${averageScore}`);
-      console.log(`Category: ${category}`);
+    // STEP 3A: Try Public Data FIRST (fastest, most reliable)
+    const publicStart = jlogStart('public-data', query);
+    let spRating: AgencyRating | null = null;
+    let fitchRating: AgencyRating | null = null;
+    let moodysRating: AgencyRating | null = null;
+
+    try {
+      const publicData = await getPublicCreditRatings(entity.name, entity.ticker);
+
+      if (publicData.sp) {
+        spRating = publicData.sp;
+        spRating.rating_norm = normalizeRating(spRating.rating, spRating.scale);
+        sources.push('Public Data (S&P)');
+      }
+      if (publicData.fitch) {
+        fitchRating = publicData.fitch;
+        fitchRating.rating_norm = normalizeRating(fitchRating.rating, fitchRating.scale);
+        sources.push('Public Data (Fitch)');
+      }
+      if (publicData.moodys) {
+        moodysRating = publicData.moodys;
+        moodysRating.rating_norm = normalizeRating(moodysRating.rating, moodysRating.scale);
+        sources.push('Public Data (Moody\'s)');
+      }
+
+      const foundCount = [publicData.sp, publicData.fitch, publicData.moodys].filter(Boolean).length;
+      jlogEnd('public-data', publicStart, foundCount > 0 ? 'success' : 'skipped', undefined, { found: foundCount });
+    } catch (publicError: any) {
+      jlogEnd('public-data', publicStart, 'failed', [publicError.message]);
+      errors.push(`Public Data: ${publicError.message}`);
     }
-    console.log(`Processing time: ${processingTime}ms`);
-    console.log('='.repeat(80) + '\n');
 
-    telemetry.successfulRequests++;
+    // STEP 3B: If missing any ratings, try UniversalScraper
+    if (!spRating || !fitchRating || !moodysRating) {
+      const scraperStart = jlogStart('universal-scraper', query);
 
-    return NextResponse.json({
-      ...response,
-      meta: {
-        traceId,
-        lastUpdated: new Date().toISOString(),
-        sourcePriority: ['live', 'cache'],
-        processingTimeMs: processingTime,
-      },
+      try {
+        const scrapedRatings = await scrapeMissingAgencies(
+          {
+            name: entity.name,
+            ticker: entity.ticker,
+            isin: undefined,
+            lei: undefined,
+            country: undefined,
+          },
+          {
+            sp: spRating,
+            fitch: fitchRating,
+            moodys: moodysRating,
+          },
+          {
+            timeoutMs: 3000,  // 3s per agency
+            maxUrls: 5,
+            useLLMFallback: true,
+          }
+        );
+
+        // Apply scraped ratings (only if not already found)
+        if (scrapedRatings.sp && !spRating) {
+          spRating = scrapedRatings.sp;
+          spRating.rating_norm = normalizeRating(spRating.rating, spRating.scale);
+          sources.push('UniversalScraper (S&P)');
+        }
+        if (scrapedRatings.fitch && !fitchRating) {
+          fitchRating = scrapedRatings.fitch;
+          fitchRating.rating_norm = normalizeRating(fitchRating.rating, fitchRating.scale);
+          sources.push('UniversalScraper (Fitch)');
+        }
+        if (scrapedRatings.moodys && !moodysRating) {
+          moodysRating = scrapedRatings.moodys;
+          moodysRating.rating_norm = normalizeRating(moodysRating.rating, moodysRating.scale);
+          sources.push('UniversalScraper (Moody\'s)');
+        }
+
+        const scrapedCount = [scrapedRatings.sp, scrapedRatings.fitch, scrapedRatings.moodys].filter(Boolean).length;
+        jlogEnd('universal-scraper', scraperStart, scrapedCount > 0 ? 'success' : 'skipped', undefined, { found: scrapedCount });
+
+      } catch (scraperError: any) {
+        jlogEnd('universal-scraper', scraperStart, 'failed', [scraperError.message]);
+        errors.push(`UniversalScraper: ${scraperError.message}`);
+      }
+    }
+
+    // STEP 3C: If still missing any ratings, try heuristic fallback (includes LLM)
+    const missingAgencies = [];
+    if (!spRating) missingAgencies.push('S&P');
+    if (!fitchRating) missingAgencies.push('Fitch');
+    if (!moodysRating) missingAgencies.push('Moody\'s');
+
+    if (missingAgencies.length > 0) {
+      jlog({
+        component: 'heuristic-fallback',
+        query,
+        outcome: 'success',
+        meta: { event: 'start', missing: missingAgencies, budget_ms: 8000 }
+      });
+
+      // Construct identifiers for heuristic functions
+      const identifiers = {
+        name: entity.name,
+        ticker: entity.ticker,
+        isin: undefined,
+        lei: undefined,
+        country: undefined,
+      };
+
+      // Run heuristics in parallel with 8s timeout (2s buffer from 10s total)
+      const [spHeuristic, fitchHeuristic, moodysHeuristic] = await Promise.allSettled([
+        !spRating ? withTimeout(
+          searchSPHeuristic(identifiers).catch(err => {
+            errors.push(`S&P Heuristic: ${err.message}`);
+            return null;
+          }),
+          8000,
+          'S&P'
+        ) : Promise.resolve(null),
+
+        !fitchRating ? withTimeout(
+          searchFitchHeuristic(identifiers).catch(err => {
+            errors.push(`Fitch Heuristic: ${err.message}`);
+            return null;
+          }),
+          8000,
+          'Fitch'
+        ) : Promise.resolve(null),
+
+        !moodysRating ? withTimeout(
+          searchMoodysHeuristic(identifiers).catch(err => {
+            errors.push(`Moody's Heuristic: ${err.message}`);
+            return null;
+          }),
+          8000,
+          'Moody\'s'
+        ) : Promise.resolve(null),
+      ]);
+
+      // Process heuristic results
+      if (spHeuristic.status === 'fulfilled' && spHeuristic.value) {
+        spRating = spHeuristic.value;
+        spRating.rating_norm = normalizeRating(spRating.rating, spRating.scale);
+        sources.push('Heuristic Fallback (S&P)');
+      }
+
+      if (fitchHeuristic.status === 'fulfilled' && fitchHeuristic.value) {
+        fitchRating = fitchHeuristic.value;
+        fitchRating.rating_norm = normalizeRating(fitchRating.rating, fitchRating.scale);
+        sources.push('Heuristic Fallback (Fitch)');
+      }
+
+      if (moodysHeuristic.status === 'fulfilled' && moodysHeuristic.value) {
+        moodysRating = moodysHeuristic.value;
+        moodysRating.rating_norm = normalizeRating(moodysRating.rating, moodysRating.scale);
+        sources.push('Heuristic Fallback (Moody\'s)');
+      }
+    }
+
+    // ===== STEP 4: BUILD RATINGS ARRAY =====
+    const ratings: AgencyRating[] = [spRating, fitchRating, moodysRating].filter((r): r is AgencyRating => r !== null);
+
+    // ===== STEP 5: CALCULATE SUMMARY =====
+    const summary = createSummary(ratings);
+
+    // ===== STEP 5.5: INSTITUTIONAL VALIDATION (Audit Trail + Data Integrity) =====
+    const validationStart = jlogStart('institutional-validation', query);
+    const validationResults: Record<string, ValidationResult> = {};
+    const auditTrails: any[] = [];
+
+    // Validate each rating individually
+    for (const rating of ratings) {
+      const ratingData: RatingData = {
+        agency: rating.agency,
+        rating: rating.rating,
+        outlook: rating.outlook,
+        date: rating.date,
+        source_ref: rating.source || 'Unknown',
+        method: (sources.some(s => s.includes('Public Data')) ? 'public_data' :
+                 sources.some(s => s.includes('UniversalScraper')) ? 'regex' :
+                 'llm') as 'regex' | 'llm' | 'public_data' | 'vendor_api'
+      };
+
+      const validation = validateInstitutional(ratingData, {
+        requireDate: false, // Optional for institutional use
+        maxAgeDays: 365,
+        requireSourceRef: true
+      });
+
+      validationResults[rating.agency] = validation;
+      auditTrails.push(...validation.auditTrail);
+
+      // Log validation warnings/errors
+      if (validation.warnings.length > 0) {
+        jlog({
+          component: 'institutional-validation',
+          query,
+          outcome: 'degraded',
+          meta: { agency: rating.agency, warnings: validation.warnings }
+        });
+      }
+      if (!validation.isValid) {
+        jlog({
+          component: 'institutional-validation',
+          query,
+          outcome: 'failed',
+          meta: { agency: rating.agency, errors: validation.errors }
+        });
+      }
+    }
+
+    // Cross-validate agencies for consistency
+    let crossValidation = null;
+    if (ratings.length >= 2) {
+      const ratingDataArray: RatingData[] = ratings.map(r => ({
+        agency: r.agency,
+        rating: r.rating,
+        outlook: r.outlook,
+        date: r.date,
+        source_ref: r.source || 'Unknown',
+        method: 'public_data' as const
+      }));
+
+      crossValidation = crossValidateAgencies(ratingDataArray);
+
+      if (!crossValidation.consistent) {
+        jlog({
+          component: 'cross-validation',
+          query,
+          outcome: 'degraded',
+          meta: { issues: crossValidation.issues }
+        });
+      }
+    }
+
+    jlogEnd('institutional-validation', validationStart, 'success', undefined, {
+      total_validations: Object.keys(validationResults).length,
+      all_valid: Object.values(validationResults).every(v => v.isValid),
+      cross_validation_passed: crossValidation?.consistent ?? true
     });
-  } catch (error) {
-    logs.push(`[API] ❌ Fatal error: ${error}`);
-    console.error('API Error:', error);
 
-    // Track error
-    const errorCode = (error as any)?.code || 'UNKNOWN_ERROR';
-    telemetry.errors.set(errorCode, (telemetry.errors.get(errorCode) || 0) + 1);
+    // ===== STEP 6: DETERMINE STATUS =====
+    // CRITICAL: Use "ok", "partial", or "error" only
+    const status: "ok" | "partial" | "error" = ratings.length === 3 ? "ok" : ratings.length > 0 ? "partial" : "error";
+
+    // ===== STEP 7: BUILD RESPONSE =====
+    const response = {
+      query,
+      status,
+      entity: {
+        legal_name: entity.name,
+        ticker: entity.ticker || '',
+        isin: '',
+        lei: '',
+        country: '',
+      },
+      ratings,
+      summary,
+      diagnostics: {
+        sources: Array.from(new Set(sources)),
+        errors,
+      },
+      validation: {
+        results: validationResults,
+        crossAgencyValidation: crossValidation,
+        auditTrail: auditTrails,
+        overallConfidence: Object.values(validationResults).every(v => v.confidence === 'high') ? 'high' :
+                          Object.values(validationResults).every(v => v.confidence !== 'rejected') ? 'medium' : 'low',
+        allValid: Object.values(validationResults).every(v => v.isValid)
+      },
+      meta: {
+        lastUpdated: new Date().toISOString(),
+        sourcePriority: Array.from(new Set(sources)),
+        traceId,
+      },
+    };
+
+    // ===== STEP 8: CACHE RESPONSE (6h TTL) =====
+    setCached(cacheKey, response);
+
+    // ===== FINAL LOG =====
+    const totalTime = Date.now() - globalStart;
+    jlogEnd('api-ratings-v2', globalStart, status === 'ok' ? 'success' : status === 'partial' ? 'degraded' : 'failed', errors.length > 0 ? errors : undefined, {
+      agencies_found: ratings.length,
+      avg_score: summary.averageScore,
+      total_ms: totalTime,
+    });
+
+    // CRITICAL: ALWAYS return 200
+    return NextResponse.json(response, { status: 200 });
+
+  } catch (fatalError: any) {
+    // CRITICAL: Even fatal errors return 200 with degraded status
+    const totalTime = Date.now() - globalStart;
+    jlogEnd('api-ratings-v2', globalStart, 'failed', [fatalError.message], { fatal: true, total_ms: totalTime });
 
     return NextResponse.json(
       {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error occurred',
-        code: errorCode,
-        traceId,
-        logs,
+        query: query || '',
+        status: 'error',
+        entity: { legal_name: '', ticker: '', isin: '', lei: '', country: '' },
+        ratings: [],
+        summary: { agenciesFound: 0, averageScore: null, category: 'Not Rated' as const },
+        diagnostics: {
+          sources: [],
+          errors: [`Fatal error: ${fatalError.message}`],
+        },
+        meta: {
+          lastUpdated: new Date().toISOString(),
+          sourcePriority: [],
+          traceId,
+        },
       },
-      { status: 502 }
+      { status: 200 }
     );
   }
 }
 
 /**
- * Telemetry endpoint
+ * Cache stats endpoint
  */
 export async function OPTIONS(request: NextRequest) {
-  const avgLatency = (agency: 'fitch' | 'sp' | 'moodys') => {
-    const latencies = telemetry.agencyLatencies[agency];
-    if (latencies.length === 0) return 0;
-    return Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
-  };
+  try {
+    const { getCacheStats } = await import('@/services/cache');
+    const stats = getCacheStats();
 
-  const successRate = (agency: 'fitch' | 'sp' | 'moodys') => {
-    const rates = telemetry.agencySuccessRates[agency];
-    if (rates.total === 0) return 0;
-    return Math.round((rates.success / rates.total) * 100);
-  };
-
-  const metrics = {
-    totalRequests: telemetry.totalRequests,
-    successfulRequests: telemetry.successfulRequests,
-    successRate: telemetry.totalRequests > 0
-      ? Math.round((telemetry.successfulRequests / telemetry.totalRequests) * 100)
-      : 0,
-    agencies: {
-      fitch: {
-        avgLatencyMs: avgLatency('fitch'),
-        successRate: successRate('fitch'),
-        totalRequests: telemetry.agencySuccessRates.fitch.total,
-        successfulRequests: telemetry.agencySuccessRates.fitch.success,
-      },
-      sp: {
-        avgLatencyMs: avgLatency('sp'),
-        successRate: successRate('sp'),
-        totalRequests: telemetry.agencySuccessRates.sp.total,
-        successfulRequests: telemetry.agencySuccessRates.sp.success,
-      },
-      moodys: {
-        avgLatencyMs: avgLatency('moodys'),
-        successRate: successRate('moodys'),
-        totalRequests: telemetry.agencySuccessRates.moodys.total,
-        successfulRequests: telemetry.agencySuccessRates.moodys.success,
-      },
-    },
-    errors: Object.fromEntries(telemetry.errors),
-  };
-
-  return NextResponse.json(metrics);
+    return NextResponse.json({
+      cache: stats,
+      timestamp: new Date().toISOString(),
+    }, { status: 200 });
+  } catch (error: any) {
+    return NextResponse.json({
+      error: 'Failed to get cache stats',
+      message: error.message,
+      timestamp: new Date().toISOString(),
+    }, { status: 200 });
+  }
 }

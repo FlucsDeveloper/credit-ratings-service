@@ -38,7 +38,6 @@ Generate variations including:
 
 Return ONLY a JSON array of unique strings.
 Example: ["Apple Inc.", "Apple", "AAPL", "APPLE INC", "Apple Computer", ...]`,
-      maxTokens: 400,
       temperature: 0.7,
     });
 
