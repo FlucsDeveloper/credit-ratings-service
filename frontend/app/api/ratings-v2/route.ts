@@ -21,6 +21,9 @@ import { jlog, jlogStart, jlogEnd } from '@/lib/log';
 import { scrapeMissingAgencies } from '@/lib/scraper/superscraper';
 import { validateInstitutional, crossValidateAgencies, type RatingData, type ValidationResult } from '@/lib/validation/institutional-validator';
 import { resolveTickerLATAM } from '@/lib/resolution/ticker-mapping';
+import { extractRatingsBatch } from '@/lib/ai/extractRatingWithDeepSeek';
+import { fetchHtml } from '@/lib/scraper/fetch';
+import { fetchRenderedHtml, appearsJavaScriptRendered } from '@/lib/scraper/headless-fetch';
 
 // Types
 import { AgencyRating } from '@/services/types';
@@ -195,7 +198,178 @@ export async function GET(request: NextRequest) {
       errors.push(`Public Data: ${publicError.message}`);
     }
 
-    // STEP 3B: If missing any ratings, try UniversalScraper
+    // STEP 3B: LATAM Companies - Use DeepSeek with correct IR URLs
+    const latamCompany = resolveTickerLATAM(query);
+    if (latamCompany?.ir_url && (!spRating || !fitchRating || !moodysRating)) {
+      const deepseekStart = jlogStart('deepseek-latam', query);
+
+      try {
+        jlog({
+          component: 'deepseek-latam',
+          query,
+          outcome: 'success',
+          meta: {
+            event: 'fetching_ir_page',
+            ir_url: latamCompany.ir_url,
+            company: latamCompany.legal_name,
+            country: latamCompany.country
+          }
+        });
+
+        // Try to fetch the ratings-specific page first, fallback to homepage
+        let html = '';
+        let finalUrl = latamCompany.ir_url;
+        let usedPlaywright = false;
+
+        const ratingsPaths = ['/en/esg/credit-ratings', '/credit-ratings', '/ratings', '/classificacao-de-risco', ''];
+        for (const path of ratingsPaths) {
+          const testUrl = latamCompany.ir_url.replace(/\/$/, '') + path;
+          try {
+            const result = await fetchHtml(testUrl, 8000, true);
+            if (result.html && result.html.length > 500) {
+              html = result.html;
+              finalUrl = result.finalUrl || testUrl;
+
+              // Check if HTML appears to be JavaScript-rendered (incomplete)
+              if (appearsJavaScriptRendered(html)) {
+                jlog({
+                  component: 'deepseek-latam',
+                  query,
+                  outcome: 'degraded',
+                  meta: {
+                    event: 'js_rendered_detected',
+                    url: testUrl,
+                    static_html_length: html.length,
+                    action: 'using_playwright_fallback'
+                  }
+                });
+
+                // Use Playwright to render JavaScript
+                try {
+                  const rendered = await fetchRenderedHtml(testUrl, 10000);
+                  html = rendered.html;
+                  finalUrl = rendered.finalUrl;
+                  usedPlaywright = true;
+
+                  jlog({
+                    component: 'deepseek-latam',
+                    query,
+                    outcome: 'success',
+                    meta: {
+                      event: 'playwright_rendered',
+                      url: testUrl,
+                      rendered_html_length: html.length,
+                      render_time_ms: rendered.renderTimeMs
+                    }
+                  });
+                } catch (playwrightError: any) {
+                  // Playwright failed, use static HTML as fallback
+                  jlog({
+                    component: 'deepseek-latam',
+                    query,
+                    outcome: 'degraded',
+                    meta: {
+                      event: 'playwright_failed',
+                      error: playwrightError.message,
+                      fallback: 'using_static_html'
+                    }
+                  });
+                }
+              }
+
+              jlog({
+                component: 'deepseek-latam',
+                query,
+                outcome: 'success',
+                meta: {
+                  event: 'found_ratings_page',
+                  url: testUrl,
+                  html_length: html.length,
+                  used_playwright: usedPlaywright
+                }
+              });
+              break;
+            }
+          } catch (e) {
+            // Try next path
+            continue;
+          }
+        }
+
+        if (html && html.length > 100) {
+          // Prepare batch extraction for missing ratings only
+          const extractionTasks = [];
+          if (!spRating) extractionTasks.push({ html, url: finalUrl || latamCompany.ir_url, agency: 'sp' as const });
+          if (!fitchRating) extractionTasks.push({ html, url: finalUrl || latamCompany.ir_url, agency: 'fitch' as const });
+          if (!moodysRating) extractionTasks.push({ html, url: finalUrl || latamCompany.ir_url, agency: 'moodys' as const });
+
+          if (extractionTasks.length > 0) {
+            const deepseekResults = await extractRatingsBatch(extractionTasks, latamCompany.legal_name);
+
+            // Convert DeepSeek results to AgencyRating format
+            for (const result of deepseekResults) {
+              if (result.found && result.rating && result.confidence && result.confidence >= 0.7) {
+                const agencyName = result.agency === 'sp' ? 'S&P Global' :
+                                 result.agency === 'fitch' ? 'Fitch' : "Moody's";
+
+                const agencyRating: AgencyRating = {
+                  agency: agencyName,
+                  rating: result.rating,
+                  outlook: result.outlook || undefined,
+                  action: undefined,
+                  date: result.date || new Date().toISOString().split('T')[0],
+                  scale: result.agency === 'moodys' ? "Moody's" : 'S&P/Fitch',
+                  source_ref: result.source_ref || latamCompany.ir_url,
+                };
+
+                agencyRating.rating_norm = normalizeRating(agencyRating.rating, agencyRating.scale);
+
+                // Apply only if not already found
+                if (result.agency === 'sp' && !spRating) {
+                  spRating = agencyRating;
+                  sources.push(`DeepSeek AI (S&P) - ${(result.confidence * 100).toFixed(0)}% confidence`);
+                } else if (result.agency === 'fitch' && !fitchRating) {
+                  fitchRating = agencyRating;
+                  sources.push(`DeepSeek AI (Fitch) - ${(result.confidence * 100).toFixed(0)}% confidence`);
+                } else if (result.agency === 'moodys' && !moodysRating) {
+                  moodysRating = agencyRating;
+                  sources.push(`DeepSeek AI (Moody's) - ${(result.confidence * 100).toFixed(0)}% confidence`);
+                }
+
+                jlog({
+                  component: 'deepseek-latam',
+                  query,
+                  outcome: 'success',
+                  meta: {
+                    agency: result.agency,
+                    rating: result.rating,
+                    confidence: result.confidence,
+                    local_notation: /\(bra\)|\(col\)|\(mex\)|\(arg\)|\.mx|\.br|\.co/.test(result.rating || '')
+                  }
+                });
+              }
+            }
+
+            const deepseekCount = deepseekResults.filter(r => r.found && r.confidence && r.confidence >= 0.7).length;
+            jlogEnd('deepseek-latam', deepseekStart, deepseekCount > 0 ? 'success' : 'skipped', undefined, {
+              found: deepseekCount,
+              total_tasks: extractionTasks.length
+            });
+          } else {
+            jlogEnd('deepseek-latam', deepseekStart, 'skipped', undefined, { reason: 'all_ratings_found' });
+          }
+        } else {
+          jlogEnd('deepseek-latam', deepseekStart, 'failed', ['HTML too short or empty']);
+          errors.push(`DeepSeek LATAM: IR page HTML too short`);
+        }
+
+      } catch (deepseekError: any) {
+        jlogEnd('deepseek-latam', deepseekStart, 'failed', [deepseekError.message]);
+        errors.push(`DeepSeek LATAM: ${deepseekError.message}`);
+      }
+    }
+
+    // STEP 3C: If still missing any ratings, try UniversalScraper
     if (!spRating || !fitchRating || !moodysRating) {
       const scraperStart = jlogStart('universal-scraper', query);
 
@@ -246,7 +420,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // STEP 3C: If still missing any ratings, try heuristic fallback (includes LLM)
+    // STEP 3D: If still missing any ratings, try heuristic fallback (includes LLM)
     const missingAgencies = [];
     if (!spRating) missingAgencies.push('S&P');
     if (!fitchRating) missingAgencies.push('Fitch');
