@@ -15,15 +15,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { resolveEntity } from "@/lib/validation/entity";
 import { searchAgency } from "@/lib/search/agency-search";
+import { generateDirectAgencyURLs, generateIRPageURLs } from "@/lib/search/direct-urls";
 import { fetchHtml } from "@/lib/scraper/fetch";
+import { fetchRenderedHtml } from "@/lib/scraper/headless-fetch";
 import { extractEvidence, isTextTooSmall } from "@/lib/evidence/extract";
 import { ratingActionWindows } from "@/lib/evidence/windowing";
 import { verifyTruth, type TruthInput } from "@/lib/validation/truth-constraints";
+import { extractRatingWithDeepSeek } from "@/lib/ai/extractRatingWithDeepSeek";
 import { getCache } from "@/lib/cache/sqlite-cache";
 import { jlog } from "@/lib/log";
 
+export const runtime = "nodejs"; // Required for Playwright
 export const dynamic = "force-dynamic";
-export const maxDuration = 30; // 30s timeout
+export const maxDuration = 60; // Increase to 60s for headless rendering
 
 type AgencyName = "moodys" | "sp" | "fitch";
 
@@ -85,16 +89,41 @@ export async function GET(request: NextRequest) {
       meta: { canonical: entity.legal_name, aliases: entity.aliases.length },
     });
 
-    // Step 2: Search for evidence URLs (Tier 1-4 strategy)
-    const searchResults = await searchAgency(entity.aliases, 24);
-    cache.incrementMetric("search_results_total", searchResults.length);
+    // Step 2: Get URLs from multiple sources
+    // A) Direct agency URLs (higher priority)
+    const directURLs = generateDirectAgencyURLs(entity.legal_name, entity.hints?.tickers?.[0]);
+    const irURLs = generateIRPageURLs(entity.legal_name, entity.hints?.tickers?.[0]);
+
+    // B) Search results (fallback)
+    const searchResults = await searchAgency(entity.aliases, 12);
+
+    // Combine all URLs, prioritizing direct agency URLs
+    const allURLs = [
+      ...directURLs.moodys.map(url => ({ url, priority: 1 })),
+      ...directURLs.sp.map(url => ({ url, priority: 1 })),
+      ...directURLs.fitch.map(url => ({ url, priority: 1 })),
+      ...irURLs.map(url => ({ url, priority: 2 })),
+      ...searchResults.map(r => ({ url: r.url, priority: 3 })),
+    ];
+
+    // De-duplicate and sort by priority
+    const uniqueURLs = Array.from(
+      new Map(allURLs.map(item => [item.url, item])).values()
+    ).sort((a, b) => a.priority - b.priority);
+
+    cache.incrementMetric("search_results_total", uniqueURLs.length);
     jlog({
       component: "api-ratings",
-      event: "search_complete",
-      meta: { urls: searchResults.length },
+      event: "urls_collected",
+      meta: {
+        direct: directURLs.moodys.length + directURLs.sp.length + directURLs.fitch.length,
+        ir: irURLs.length,
+        search: searchResults.length,
+        total: uniqueURLs.length,
+      },
     });
 
-    if (searchResults.length === 0) {
+    if (uniqueURLs.length === 0) {
       const emptyResponse = buildEmptyResponse(query, entity.legal_name, entity.aliases);
       cache.set(cacheKey, emptyResponse, 7);
       return NextResponse.json(emptyResponse);
@@ -107,10 +136,10 @@ export async function GET(request: NextRequest) {
       fitch: buildNotFound("fitch"),
     };
 
-    const urlBatches = batchArray(searchResults.slice(0, 24), 3);
+    const urlBatches = batchArray(uniqueURLs.slice(0, 24).map(u => u.url), 3);
 
     for (const batch of urlBatches) {
-      const fetchPromises = batch.map(async ({ url }) => {
+      const fetchPromises = batch.map(async (url: string) => {
         try {
           const result = await fetchHtml(url, 8000, true); // 8s timeout
 
@@ -140,31 +169,48 @@ export async function GET(request: NextRequest) {
         html: string;
       }>;
 
-      // Step 4: Extract evidence, window, score
-      for (const { url, html } of fetchResults) {
-        const evidence = extractEvidence(html, url);
+      // Step 4: Extract evidence using AI (with headless fallback)
+      for (const { url, html: initialHtml } of fetchResults) {
+        let html = initialHtml;
+        let evidence = extractEvidence(html, url);
 
         // Trigger headless fallback if text too small (< 500 chars)
         if (isTextTooSmall(evidence, 500)) {
-          jlog({ component: "api-ratings", event: "text_too_small", meta: { url } });
-          continue; // Skip or implement headless fetch here
+          jlog({ component: "api-ratings", event: "text_too_small_triggering_headless", meta: { url } });
+
+          try {
+            const headlessResult = await fetchRenderedHtml(url, 10000);
+            html = headlessResult.html;
+            evidence = extractEvidence(html, url);
+
+            jlog({ component: "api-ratings", event: "headless_success", meta: { url, textLength: evidence.metadata.textLength } });
+          } catch (error) {
+            jlog({ component: "api-ratings", event: "headless_failed", meta: { url, error } });
+            continue; // Skip this URL if headless fails
+          }
         }
 
-        // Generate windows
-        const windows = ratingActionWindows(evidence.visibleText, entity.aliases, 12);
-        cache.incrementMetric("evidence_windows_total", windows.length);
-
-        if (windows.length === 0) {
+        // Use AI extractor instead of basic regex
+        const agencyName = detectAgency(url);
+        if (!agencyName) {
+          jlog({ component: "api-ratings", event: "agency_not_detected", meta: { url } });
           continue;
         }
 
-        // Score each window
-        for (const window of windows) {
-          const extracted = extractRatingFromWindow(window);
-          if (!extracted) continue;
+        try {
+          // Use existing AI extractor
+          const aiResult = await extractRatingWithDeepSeek(
+            evidence.visibleText.slice(0, 8000), // Limit to 8K chars for LLM
+            entity.legal_name,
+            { agency: agencyName, maxTokens: 500, temperature: 0.1 }
+          );
 
-          const agencyName = detectAgency(url);
-          if (!agencyName) continue;
+          if (!aiResult.found || !aiResult.rating) {
+            jlog({ component: "api-ratings", event: "ai_no_rating", meta: { url, agency: agencyName } });
+            continue;
+          }
+
+          const confidence = aiResult.confidence || 0.8;
 
           // Verify truth constraints
           const truthInput: TruthInput = {
@@ -172,13 +218,13 @@ export async function GET(request: NextRequest) {
             aliases: entity.aliases,
             domain: new URL(url).hostname,
             url,
-            window,
+            window: aiResult.source_snippet || evidence.visibleText.slice(0, 500),
             entry: {
-              agency: extracted.agency,
-              rating_raw: extracted.rating,
-              outlook: extracted.outlook,
-              as_of: extracted.date,
-              confidence: extracted.confidence,
+              agency: aiResult.agency || agencyName,
+              rating_raw: aiResult.rating,
+              outlook: aiResult.outlook,
+              as_of: aiResult.date,
+              confidence,
             },
           };
 
@@ -186,20 +232,21 @@ export async function GET(request: NextRequest) {
 
           if (!truthResult.accept) {
             cache.incrementMetric("filtered_out_total");
+            jlog({ component: "api-ratings", event: "truth_check_failed", meta: { url, agency: agencyName, reason: truthResult.reason } });
             continue;
           }
 
           // Accept if confidence meets threshold and better than existing
           if (
-            truthResult.adjustedConfidence >= 0.75 &&
+            truthResult.adjustedConfidence >= 0.60 && // Lower threshold for AI extraction
             truthResult.adjustedConfidence > agencies[agencyName].confidence
           ) {
             agencies[agencyName] = {
               agency: agencyName,
               status: "found",
-              rating: extracted.rating,
-              outlook: extracted.outlook,
-              date: extracted.date,
+              rating: aiResult.rating,
+              outlook: aiResult.outlook || null,
+              date: aiResult.date || null,
               source_url: url,
               confidence: truthResult.adjustedConfidence,
             };
@@ -207,9 +254,16 @@ export async function GET(request: NextRequest) {
             jlog({
               component: "api-ratings",
               event: "rating_found",
-              meta: { agency: agencyName, rating: extracted.rating, confidence: truthResult.adjustedConfidence },
+              meta: {
+                agency: agencyName,
+                rating: aiResult.rating,
+                confidence: truthResult.adjustedConfidence,
+                method: "ai_extraction"
+              },
             });
           }
+        } catch (error) {
+          jlog({ component: "api-ratings", event: "ai_extraction_error", meta: { url, error } });
         }
       }
     }
