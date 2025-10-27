@@ -26,7 +26,7 @@ import { fetchHtml } from '@/lib/scraper/fetch';
 import { fetchRenderedHtml, appearsJavaScriptRendered } from '@/lib/scraper/headless-fetch';
 
 // Types
-import { AgencyRating } from '@/services/types';
+import { AgencyRating, RatingAgency } from '@/services/types';
 
 // CRITICAL: Playwright requires Node runtime (not Edge)
 export const runtime = 'nodejs';
@@ -230,7 +230,7 @@ export async function GET(request: NextRequest) {
             const result = await fetchHtml(testUrl, 8000, true);
             if (result.html && result.html.length > 500) {
               html = result.html;
-              finalUrl = result.finalUrl || testUrl;
+              finalUrl = result.url || testUrl;
 
               // Check if HTML appears to be JavaScript-rendered (incomplete)
               if (appearsJavaScriptRendered(html)) {
@@ -331,13 +331,13 @@ export async function GET(request: NextRequest) {
                 }
 
                 const agencyRating: AgencyRating = {
-                  agency: normalizedAgency,
+                  agency: normalizedAgency as RatingAgency,
                   rating: result.rating,
-                  outlook: result.outlook || undefined,
+                  outlook: (result.outlook as any) || undefined,
                   action: undefined,
                   date: result.date || new Date().toISOString().split('T')[0],
                   scale: agencyCode === 'moodys' ? "Moody's" : 'S&P/Fitch',
-                  source_ref: result.source_ref || latamCompany.ir_url,
+                  source_ref: (result as any).source_ref || latamCompany.ir_url,
                 };
 
                 agencyRating.rating_norm = normalizeRating(agencyRating.rating, agencyRating.scale);
