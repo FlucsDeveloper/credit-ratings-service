@@ -98,7 +98,7 @@ async function testCase(testCase: QATestCase) {
   console.log(`\n  Testing: ${query}...`);
 
   try {
-    const response = await fetch(`http://localhost:3000/api/ratings?q=${encodeURIComponent(query)}`);
+    const response = await fetch(`http://localhost:3000/api/ratings?q=${encodeURIComponent(query)}&nocache=1`);
 
     if (!response.ok) {
       console.log(`    ❌ API error: ${response.status}`);
