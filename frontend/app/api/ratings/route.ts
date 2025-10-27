@@ -24,6 +24,8 @@ import { verifyTruth, type TruthInput } from "@/lib/validation/truth-constraints
 import { extractRatingWithDeepSeek } from "@/lib/ai/extractRatingWithDeepSeek";
 import { getCache } from "@/lib/cache/sqlite-cache";
 import { jlog } from "@/lib/log";
+import { extractLinks } from "@/lib/scraper/link-extractor";
+import { fetchPdfText } from "@/lib/scraper/pdf";
 
 export const runtime = "nodejs"; // Required for Playwright
 export const dynamic = "force-dynamic";
@@ -165,7 +167,52 @@ export async function GET(request: NextRequest) {
         html: string;
       }>;
 
-      // Step 4: Extract evidence using AI (with headless fallback)
+      // Step 4: Extract links (PDFs and articles) from search results
+      const allExtractedLinks: Array<{ url: string; type: string; baseUrl: string }> = [];
+      for (const { url, html } of fetchResults) {
+        const links = extractLinks(html, url);
+        // Take top 3 high-priority links per page
+        const topLinks = links.filter(l => l.priority === 1).slice(0, 3);
+        allExtractedLinks.push(...topLinks.map(l => ({ url: l.url, type: l.type, baseUrl: url })));
+      }
+
+      jlog({
+        component: "api-ratings",
+        event: "links_extracted",
+        meta: {
+          total: allExtractedLinks.length,
+          pdfs: allExtractedLinks.filter(l => l.type === 'pdf').length,
+          articles: allExtractedLinks.filter(l => l.type === 'article').length
+        }
+      });
+
+      // Step 5: Fetch PDF and article content (limit to 10 total)
+      const linkedContent: Array<{ url: string; text: string }> = [];
+      for (const link of allExtractedLinks.slice(0, 10)) {
+        try {
+          if (link.type === 'pdf') {
+            const pdfText = await fetchPdfText(link.url);
+            if (pdfText && pdfText.length > 100) {
+              linkedContent.push({ url: link.url, text: pdfText });
+              jlog({ component: "api-ratings", event: "pdf_fetched", meta: { url: link.url, textLength: pdfText.length } });
+            }
+          } else {
+            // Fetch article HTML
+            const articleResult = await fetchHtml(link.url, 6000, true);
+            if (articleResult.status === 200 && articleResult.html) {
+              const articleEvidence = extractEvidence(articleResult.html, link.url);
+              if (articleEvidence.visibleText.length > 200) {
+                linkedContent.push({ url: link.url, text: articleEvidence.visibleText });
+                jlog({ component: "api-ratings", event: "article_fetched", meta: { url: link.url, textLength: articleEvidence.visibleText.length } });
+              }
+            }
+          }
+        } catch (error) {
+          jlog({ component: "api-ratings", event: "link_fetch_failed", meta: { url: link.url, error } });
+        }
+      }
+
+      // Step 6: Process main page content + linked content
       for (const { url, html: initialHtml } of fetchResults) {
         let html = initialHtml;
         let evidence = extractEvidence(html, url);
@@ -262,9 +309,90 @@ export async function GET(request: NextRequest) {
           jlog({ component: "api-ratings", event: "ai_extraction_error", meta: { url, error } });
         }
       }
+
+      // Step 7: Process linked content (PDFs and articles)
+      for (const { url, text } of linkedContent) {
+        // Try to detect agency from URL or content
+        let agencyName = detectAgency(url);
+
+        // If no agency detected from URL, try all agencies
+        const agenciesToTry: AgencyName[] = agencyName ? [agencyName] : ["moodys", "sp", "fitch"];
+
+        for (const agency of agenciesToTry) {
+          // Skip if we already found this agency
+          if (agencies[agency].status === "found") continue;
+
+          try {
+            const aiResult = await extractRatingWithDeepSeek(
+              text.slice(0, 8000), // Limit to 8K chars
+              entity.legal_name,
+              { agency, maxTokens: 500, temperature: 0.1 }
+            );
+
+            if (!aiResult.found || !aiResult.rating) {
+              continue;
+            }
+
+            const confidence = aiResult.confidence || 0.8;
+
+            // Verify truth constraints
+            const truthInput: TruthInput = {
+              company: entity.legal_name,
+              aliases: entity.aliases,
+              domain: new URL(url).hostname,
+              url,
+              window: aiResult.source_snippet || text.slice(0, 500),
+              entry: {
+                agency: aiResult.agency || agency,
+                rating_raw: aiResult.rating,
+                outlook: aiResult.outlook,
+                as_of: aiResult.date,
+                confidence,
+              },
+            };
+
+            const truthResult = verifyTruth(truthInput);
+
+            if (!truthResult.accept) {
+              cache.incrementMetric("filtered_out_total");
+              continue;
+            }
+
+            // Accept if confidence meets threshold and better than existing
+            if (
+              truthResult.adjustedConfidence >= 0.60 &&
+              truthResult.adjustedConfidence > agencies[agency].confidence
+            ) {
+              agencies[agency] = {
+                agency,
+                status: "found",
+                rating: aiResult.rating,
+                outlook: aiResult.outlook || null,
+                date: aiResult.date || null,
+                source_url: url,
+                confidence: truthResult.adjustedConfidence,
+              };
+
+              jlog({
+                component: "api-ratings",
+                event: "rating_found",
+                meta: {
+                  agency,
+                  rating: aiResult.rating,
+                  confidence: truthResult.adjustedConfidence,
+                  method: "linked_content",
+                  source_type: url.endsWith('.pdf') ? 'pdf' : 'article'
+                },
+              });
+            }
+          } catch (error) {
+            jlog({ component: "api-ratings", event: "linked_content_extraction_error", meta: { url, agency, error } });
+          }
+        }
+      }
     }
 
-    // Step 5: Build response
+    // Step 8: Build response
     const response: RatingsResponse = {
       agencies,
       metadata: {
