@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Company {
+  id          String   @id @default(uuid())
+  name        String
+  ticker      String?
+  country     String?
+  sector      String?
+  irUrl       String?
+  lastUpdated DateTime @default(now())
+  ratings     Rating[]
+}
+
+model Rating {
+  id         String   @id @default(uuid())
+  companyId  String
+  agency     String
+  ratingRaw  String
+  normalized Int?
+  outlook    String?
+  asOf       DateTime?
+  source     String
+  checksum   String
+  confidence Float
+  createdAt  DateTime @default(now())
+
+  Company Company @relation(fields: [companyId], references: [id])
+}

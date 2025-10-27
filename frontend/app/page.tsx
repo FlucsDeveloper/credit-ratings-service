@@ -26,6 +26,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isDegraded, setIsDegraded] = useState(false);
 
   // Transformar array de ratings em objeto {sp, fitch, moodys}
   const transformRatings = (data: any) => {
@@ -49,6 +50,7 @@ export default function Home() {
   const handleSearch = async (company: string) => {
     setIsLoading(true);
     setError(null);
+    setIsDegraded(false);
 
     try {
       const res = await fetch(`/api/ratings-v2?q=${encodeURIComponent(company)}`);
@@ -59,6 +61,9 @@ export default function Home() {
         // Transformar ratings array em objeto
         const transformedData = transformRatings(data);
         setResults(transformedData);
+
+        // Track degraded status
+        setIsDegraded(data.status === "degraded");
 
         // Mostrar aviso se degraded
         if (data.status === "degraded" && data.ratings.length === 0) {
@@ -212,6 +217,30 @@ export default function Home() {
                 <div className="flex items-center gap-3">
                   <AlertCircle className="w-5 h-5 text-destructive" />
                   <p className="text-destructive">{error}</p>
+                </div>
+              </CardContent>
+            </Card>
+          </motion.div>
+        )}
+
+        {/* Degraded Status Info Banner */}
+        {isDegraded && results && results.ratings && Object.keys(results.ratings).length > 0 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+          >
+            <Card className="border-yellow-500 bg-yellow-50 dark:bg-yellow-950/20">
+              <CardContent className="pt-6">
+                <div className="flex items-center gap-3">
+                  <AlertCircle className="w-5 h-5 text-yellow-600 dark:text-yellow-500" />
+                  <div className="flex-1">
+                    <p className="text-yellow-800 dark:text-yellow-200 font-medium">
+                      Partial Results
+                    </p>
+                    <p className="text-sm text-yellow-700 dark:text-yellow-300 mt-1">
+                      Some official agency pages could not be accessed. Results shown are from available sources and may be incomplete.
+                    </p>
+                  </div>
                 </div>
               </CardContent>
             </Card>

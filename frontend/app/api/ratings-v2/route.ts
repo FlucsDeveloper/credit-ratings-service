@@ -28,6 +28,8 @@ import { fetchRenderedHtml, appearsJavaScriptRendered } from '@/lib/scraper/head
 // Types
 import { AgencyRating } from '@/services/types';
 
+// CRITICAL: Playwright requires Node runtime (not Edge)
+export const runtime = 'nodejs';
 export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
@@ -309,29 +311,45 @@ export async function GET(request: NextRequest) {
             // Convert DeepSeek results to AgencyRating format
             for (const result of deepseekResults) {
               if (result.found && result.rating && result.confidence && result.confidence >= 0.7) {
-                const agencyName = result.agency === 'sp' ? 'S&P Global' :
-                                 result.agency === 'fitch' ? 'Fitch' : "Moody's";
+                // Normalize agency name to standard format
+                let normalizedAgency: string;
+                let agencyCode: 'sp' | 'fitch' | 'moodys';
+
+                const agencyLower = (result.agency || '').toLowerCase();
+                if (agencyLower.includes('s&p') || agencyLower.includes('standard')) {
+                  normalizedAgency = 'S&P Global';
+                  agencyCode = 'sp';
+                } else if (agencyLower.includes('fitch')) {
+                  normalizedAgency = 'Fitch';
+                  agencyCode = 'fitch';
+                } else if (agencyLower.includes('moody')) {
+                  normalizedAgency = "Moody's";
+                  agencyCode = 'moodys';
+                } else {
+                  // Skip if agency not recognized
+                  continue;
+                }
 
                 const agencyRating: AgencyRating = {
-                  agency: agencyName,
+                  agency: normalizedAgency,
                   rating: result.rating,
                   outlook: result.outlook || undefined,
                   action: undefined,
                   date: result.date || new Date().toISOString().split('T')[0],
-                  scale: result.agency === 'moodys' ? "Moody's" : 'S&P/Fitch',
+                  scale: agencyCode === 'moodys' ? "Moody's" : 'S&P/Fitch',
                   source_ref: result.source_ref || latamCompany.ir_url,
                 };
 
                 agencyRating.rating_norm = normalizeRating(agencyRating.rating, agencyRating.scale);
 
                 // Apply only if not already found
-                if (result.agency === 'sp' && !spRating) {
+                if (agencyCode === 'sp' && !spRating) {
                   spRating = agencyRating;
                   sources.push(`DeepSeek AI (S&P) - ${(result.confidence * 100).toFixed(0)}% confidence`);
-                } else if (result.agency === 'fitch' && !fitchRating) {
+                } else if (agencyCode === 'fitch' && !fitchRating) {
                   fitchRating = agencyRating;
                   sources.push(`DeepSeek AI (Fitch) - ${(result.confidence * 100).toFixed(0)}% confidence`);
-                } else if (result.agency === 'moodys' && !moodysRating) {
+                } else if (agencyCode === 'moodys' && !moodysRating) {
                   moodysRating = agencyRating;
                   sources.push(`DeepSeek AI (Moody's) - ${(result.confidence * 100).toFixed(0)}% confidence`);
                 }
@@ -369,18 +387,21 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // STEP 3C: If still missing any ratings, try UniversalScraper
+    // STEP 3C: If still missing any ratings, try UniversalScraper with LLM discovery
     if (!spRating || !fitchRating || !moodysRating) {
       const scraperStart = jlogStart('universal-scraper', query);
 
       try {
+        // Get IR URL if available from LATAM database
+        const irUrl = latamCompany?.ir_url || undefined;
+
         const scrapedRatings = await scrapeMissingAgencies(
           {
             name: entity.name,
             ticker: entity.ticker,
             isin: undefined,
             lei: undefined,
-            country: undefined,
+            country: latamCompany?.country || undefined,
           },
           {
             sp: spRating,
@@ -389,8 +410,10 @@ export async function GET(request: NextRequest) {
           },
           {
             timeoutMs: 3000,  // 3s per agency
-            maxUrls: 5,
+            maxUrls: 8,       // Increased to allow more LLM-discovered URLs
             useLLMFallback: true,
+            useLLMDiscovery: true,  // NEW: Enable LLM-assisted URL discovery
+            irUrl: irUrl,           // NEW: Pass IR URL from database
           }
         );
 
@@ -576,8 +599,8 @@ export async function GET(request: NextRequest) {
     });
 
     // ===== STEP 6: DETERMINE STATUS =====
-    // CRITICAL: Use "ok", "partial", or "error" only
-    const status: "ok" | "partial" | "error" = ratings.length === 3 ? "ok" : ratings.length > 0 ? "partial" : "error";
+    // CRITICAL: Use "ok", "degraded", or "error" only
+    const status: "ok" | "degraded" | "error" = ratings.length === 3 ? "ok" : ratings.length > 0 ? "degraded" : "error";
 
     // ===== STEP 7: BUILD RESPONSE =====
     const response = {
@@ -616,7 +639,7 @@ export async function GET(request: NextRequest) {
 
     // ===== FINAL LOG =====
     const totalTime = Date.now() - globalStart;
-    jlogEnd('api-ratings-v2', globalStart, status === 'ok' ? 'success' : status === 'partial' ? 'degraded' : 'failed', errors.length > 0 ? errors : undefined, {
+    jlogEnd('api-ratings-v2', globalStart, status === 'ok' ? 'success' : status === 'degraded' ? 'degraded' : 'failed', errors.length > 0 ? errors : undefined, {
       agencies_found: ratings.length,
       avg_score: summary.averageScore,
       total_ms: totalTime,
