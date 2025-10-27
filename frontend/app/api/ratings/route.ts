@@ -89,21 +89,18 @@ export async function GET(request: NextRequest) {
       meta: { canonical: entity.legal_name, aliases: entity.aliases.length },
     });
 
-    // Step 2: Get URLs from multiple sources
-    // A) Direct agency URLs (higher priority)
-    const directURLs = generateDirectAgencyURLs(entity.legal_name, entity.hints?.tickers?.[0]);
+    // Step 2: Get URLs from search (prioritizing IR/newswires per PRD)
+    // Per PRD: "use issuer IR and reputable newswires as mirrors when agencies block"
+    // Search strategy now prioritizes IR/newswires in tiers 1-2, agencies in tier 3
+    const searchResults = await searchAgency(entity.aliases, 20);
+
+    // Only use IR URLs as supplementary (search already covers this)
     const irURLs = generateIRPageURLs(entity.legal_name, entity.hints?.tickers?.[0]);
 
-    // B) Search results (fallback)
-    const searchResults = await searchAgency(entity.aliases, 12);
-
-    // Combine all URLs, prioritizing direct agency URLs
+    // Combine URLs: search results first (already tiered), then supplementary IR
     const allURLs = [
-      ...directURLs.moodys.map(url => ({ url, priority: 1 })),
-      ...directURLs.sp.map(url => ({ url, priority: 1 })),
-      ...directURLs.fitch.map(url => ({ url, priority: 1 })),
+      ...searchResults.map(r => ({ url: r.url, priority: 1 })),
       ...irURLs.map(url => ({ url, priority: 2 })),
-      ...searchResults.map(r => ({ url: r.url, priority: 3 })),
     ];
 
     // De-duplicate and sort by priority
@@ -116,9 +113,8 @@ export async function GET(request: NextRequest) {
       component: "api-ratings",
       event: "urls_collected",
       meta: {
-        direct: directURLs.moodys.length + directURLs.sp.length + directURLs.fitch.length,
-        ir: irURLs.length,
         search: searchResults.length,
+        ir_supplement: irURLs.length,
         total: uniqueURLs.length,
       },
     });
